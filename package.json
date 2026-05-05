@@ -1,0 +1,34 @@
+{
+  "name": "claw-clean",
+  "version": "1.0.0",
+  "description": "Interactive session cleanup tool for OpenClaw — TUI menu with arrow-key navigation",
+  "main": "claw-clean.sh",
+  "bin": {
+    "claw-clean": "claw-clean.sh"
+  },
+  "files": [
+    "claw-clean.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "echo 'Manual test: ./claw-clean.sh'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QQSHI13/claw-clean.git"
+  },
+  "keywords": [
+    "openclaw",
+    "session",
+    "cleanup",
+    "cli",
+    "tui",
+    "interactive"
+  ],
+  "author": "QQSHI13",
+  "license": "GPL-3.0",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

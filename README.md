@@ -6,7 +6,6 @@ Interactive session cleanup tool for [OpenClaw](https://openclaw.org).
 
 - **TUI menu** with arrow-key navigation (inspired by `@clack/prompts`)
 - **Selectable sessions** — each session listed with full UUID + identifier
-- **Orphaned session detection** — finds sessions in `sessions.json` with missing files (highlighted in yellow)
 - **Smooth cursor** — only updates changed lines, no full redraw
 - **Space to toggle**, Enter to execute
 - **Auto-detected trash command** — works with `trash`, `trash-put`, or `gio trash`

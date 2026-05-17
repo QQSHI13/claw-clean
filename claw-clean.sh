@@ -597,7 +597,7 @@ while true; do
         old_cursor=$cursor
         cursor=$((cursor - 1))
         update_item_symbol "$old_cursor" "  "
-        update_item_symbol "$cursor" "> "
+        update_item_symbol "$cursor" "${_C}>${_N} "
       fi
       ;;
     $'\x1b[B')
@@ -605,7 +605,7 @@ while true; do
         old_cursor=$cursor
         cursor=$((cursor + 1))
         update_item_symbol "$old_cursor" "  "
-        update_item_symbol "$cursor" "> "
+        update_item_symbol "$cursor" "${_C}>${_N} "
       fi
       ;;
     ' '|$'\x20')
@@ -615,7 +615,7 @@ while true; do
         else
           SESS_SELECTED[$cursor]="true"
         fi
-        update_item_symbol "$cursor" "> "
+        update_item_symbol "$cursor" "${_C}>${_N} "
       elif [[ $cursor -lt $((S_COUNT + ORPHAN_COUNT)) ]]; then
         oidx=$((cursor - S_COUNT))
         if [[ "${ORPHAN_SELECTED[$oidx]}" == "true" ]]; then
@@ -623,10 +623,10 @@ while true; do
         else
           ORPHAN_SELECTED[$oidx]="true"
         fi
-        update_item_symbol "$cursor" "> "
+        update_item_symbol "$cursor" "${_C}>${_N} "
       else
         [[ "$sel_stale" == true ]] && sel_stale=false || sel_stale=true
-        update_item_symbol "$cursor" "> "
+        update_item_symbol "$cursor" "${_C}>${_N} "
       fi
       ;;
     ''|$'\x0a'|$'\x0d')

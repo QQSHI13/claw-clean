@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Session Cleanup Tool — @clack/prompts-style TUI in pure bash
-# Version: 1.1.1
+# Version: 1.1.2
 # Usage: claw-clean [-a agent] [-h]
 #
 # Features:
 #   • Smooth cursor movement — only updates changed lines, no full redraw
-#   • Each session is selectable with full ID + identifier displayed
 #   • Orphaned session detection — sessions in sessions.json with no file
-#   • "Clean stale data" option for .deleted, .bak-*, and archive/
-#   • Trajectory companions are cleaned alongside selected sessions
+#   • Auto-detected trash command — trash, trash-put, gio trash
+#   • Trajectory companions cleaned alongside selected sessions
 
 set -euo pipefail
 
@@ -44,9 +43,6 @@ Interactive controls:
   Space     Toggle selection
   Enter     Execute selected items
   q / Ctrl+C  Quit without doing anything
-
-The menu shows each session (with ID + identifier) + orphaned sessions
-+ a stale-data option. Select what you want to clean, then press Enter.
 EOF
       exit 0
       ;;
@@ -55,7 +51,7 @@ EOF
 done
 
 # ── Validate requirements ───────────────────────────────────────────
-[[ -n "$TRASH_CMD" ]] || { echo "Error: No trash command found (tried: trash, trash-put, gio trash). Install trash-cli: pip install trash-cli" >&2; exit 1; }
+[[ -n "$TRASH_CMD" ]] || { echo "Error: No trash command found. Install trash-cli: pip install trash-cli" >&2; exit 1; }
 
 STATE_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
 SESSION_DIR="$STATE_DIR/agents/$AGENT_ID/sessions"
@@ -67,16 +63,12 @@ ARCHIVE_DIR="$SESSION_DIR/archive"
 if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
   _B=$(printf '\033[1m');  _D=$(printf '\033[2m');  _N=$(printf '\033[0m')
   _R=$(printf '\033[31m'); _G=$(printf '\033[32m'); _Y=$(printf '\033[33m')
-  _C=$(printf '\033[36m'); _M=$(printf '\033[35m')
+  _C=$(printf '\033[36m')
 else
-  _B=''; _D=''; _N=''; _R=''; _G=''; _Y=''; _C=''; _M=''
+  _B=''; _D=''; _N=''; _R=''; _G=''; _Y=''; _C=''
 fi
 
 # ── Helpers ───────────────────────────────────────────────────────
-die() { printf "%sError:%s %s\n" "$_R" "$_N" "$1" >&2; exit 1; }
-info() { printf "%s→%s %s\n" "$_G" "$_N" "$1"; }
-warn() { printf "%s⚠%s %s\n" "$_Y" "$_N" "$1"; }
-
 fmt() {
   local b=$1
   if command -v numfmt &>/dev/null; then numfmt --to=iec-i --suffix=B "$b"
@@ -136,22 +128,20 @@ declare -a ORPHAN_IDS=()
 declare -a ORPHAN_KEYS=()
 declare -a ORPHAN_SELECTED=()
 
+# Line position tracking — exact line number of each item in render_menu
+declare -a ITEM_LINE=()
+MENU_BASE_UP=0
+
 gather_data() {
   S_COUNT=0 S_SIZE=0 OPEN_C=0 ACTIVE_C=0
   STALE_COUNT=0 STALE_SIZE=0
   ORPHAN_COUNT=0
 
-  SESS_FILES=()
-  SESS_IDS=()
-  SESS_KEYS=()
-  SESS_SIZES=()
-  SESS_AGES=()
-  SESS_STATUS=()
-  SESS_SELECTED=()
+  SESS_FILES=(); SESS_IDS=(); SESS_KEYS=(); SESS_SIZES=()
+  SESS_AGES=(); SESS_STATUS=(); SESS_SELECTED=()
 
-  ORPHAN_IDS=()
-  ORPHAN_KEYS=()
-  ORPHAN_SELECTED=()
+  ORPHAN_IDS=(); ORPHAN_KEYS=(); ORPHAN_SELECTED=()
+  ITEM_LINE=()
 
   while IFS= read -r f; do
     [[ -f "$f" ]] || continue
@@ -174,6 +164,7 @@ gather_data() {
     [[ "$st" == "active" ]] && ACTIVE_C=$((ACTIVE_C + 1))
   done < <(list_sessions)
 
+  # Find orphaned sessions
   if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
     while IFS= read -r id; do
       [[ -n "$id" ]] || continue
@@ -188,6 +179,7 @@ gather_data() {
     done < <(jq -r 'to_entries[] | select(.value.sessionId != null) | .value.sessionId' "$SESSION_DIR/sessions.json" 2>/dev/null)
   fi
 
+  # Stale data counting
   for f in "$SESSION_DIR"/*.deleted.*; do
     [[ -f "$f" ]] || continue
     local sz=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)
@@ -222,31 +214,62 @@ gather_data() {
       STALE_SIZE=$((STALE_SIZE + sz)); STALE_COUNT=$((STALE_COUNT + 1))
     done
   fi
+
+  # Build ITEM_LINE mapping: item index -> line offset from first item
+  # render_menu layout:
+  #   line 0: blank
+  #   line 1: "? Select..."
+  #   line 2: blank
+  #   line 3..3+S_COUNT-1: sessions
+  #   [if orphans:]
+  #     line 3+S_COUNT: blank
+  #     line 3+S_COUNT+1: "? Orphaned..."
+  #     line 3+S_COUNT+2: blank
+  #     line 3+S_COUNT+3 .. +3+ORPHAN_COUNT-1: orphans
+  #   line after orphans/sessions: blank
+  #   next: stale option
+  #   next: blank
+  #   next: hint (cursor sits here)
+  
+  local line=0
+  for ((i=0; i<S_COUNT; i++)); do
+    ITEM_LINE[$i]=$line
+    line=$((line + 1))
+  done
+  
+  if [[ $ORPHAN_COUNT -gt 0 ]]; then
+    line=$((line + 3))  # blank + header + blank
+    for ((i=0; i<ORPHAN_COUNT; i++)); do
+      local idx=$((S_COUNT + i))
+      ITEM_LINE[$idx]=$line
+      line=$((line + 1))
+    done
+  fi
+  
+  # Stale option
+  local stale_idx=$((S_COUNT + ORPHAN_COUNT))
+  line=$((line + 1))  # blank before stale
+  ITEM_LINE[$stale_idx]=$line
+  
+  # Lines from first item to cursor (after hint line)
+  # After stale: blank + hint = 2 more lines
+  MENU_BASE_UP=$((line + 2))
 }
 
 # ── TUI helpers ───────────────────────────────────────────────────
 hide_cursor() { printf '\033[?25l'; }
 show_cursor() { printf '\033[?25h'; }
 
-calc_menu_base_up() {
-  local total=7
-  total=$((total + S_COUNT))
-  if [[ $ORPHAN_COUNT -gt 0 ]]; then
-    total=$((total + ORPHAN_COUNT + 3))
-  fi
-  echo $((total - 4))
-}
-
-MENU_BASE_UP=0
-
 move_to_item() {
   local idx=$1
-  printf '\033[%dA\r' "$((MENU_BASE_UP - idx))"
+  local offset=${ITEM_LINE[$idx]}
+  printf '\033[%dA\r' "$((MENU_BASE_UP - offset))"
 }
 
 move_to_bottom_from() {
   local idx=$1
-  printf '\033[%dB' "$((MENU_BASE_UP - idx))"
+  local offset=${ITEM_LINE[$idx]}
+  printf '\033[%dB' "$((MENU_BASE_UP - offset))"
 }
 
 update_item_symbol() {
@@ -291,7 +314,7 @@ render_menu() {
   printf "%s? Select sessions / cleanup actions:%s\n" "$_B" "$_N"
   printf "\n"
 
-  for i in $(seq 0 $((S_COUNT - 1))); do
+  for ((i=0; i<S_COUNT; i++)); do
     local id="${SESS_IDS[$i]}"
     local key="${SESS_KEYS[$i]}"
     local sz="${SESS_SIZES[$i]}"
@@ -318,7 +341,7 @@ render_menu() {
     printf "\n"
     printf "%s? Orphaned sessions (in sessions.json, file missing):%s\n" "$_Y" "$_N"
     printf "\n"
-    for i in $(seq 0 $((ORPHAN_COUNT - 1))); do
+    for ((i=0; i<ORPHAN_COUNT; i++)); do
       local idx=$((S_COUNT + i))
       local id="${ORPHAN_IDS[$i]}"
       local key="${ORPHAN_KEYS[$i]}"
@@ -374,12 +397,17 @@ read_key() {
   printf '%s' "$key"
 }
 
+trash_file() {
+  local f="$1"
+  $TRASH_CMD "$f"
+}
+
 execute_selected() {
   local did_something=false
   local total_trashed=0
   local total_size=0
 
-  for i in $(seq 0 $((S_COUNT - 1))); do
+  for ((i=0; i<S_COUNT; i++)); do
     [[ "${SESS_SELECTED[$i]}" == "true" ]] || continue
 
     local f="${SESS_FILES[$i]}"
@@ -388,21 +416,21 @@ execute_selected() {
 
     printf "\n%sTrashing session %s%s%s (%s)%s\n" "$_B" "$_C" "$id" "$_N" "$(fmt $sz)" "$_N"
 
-    $TRASH_CMD "$f"
+    trash_file "$f"
     total_trashed=$((total_trashed + 1))
     total_size=$((total_size + sz))
 
     local tjf="$SESSION_DIR/${id}.trajectory.jsonl"
     if [[ -f "$tjf" ]]; then
       local tsz=$(stat -c %s "$tjf" 2>/dev/null || stat -f %z "$tjf" 2>/dev/null)
-      $TRASH_CMD "$tjf"
+      trash_file "$tjf"
       total_size=$((total_size + tsz))
     fi
 
     local tpjf="$SESSION_DIR/${id}.trajectory-path.json"
     if [[ -f "$tpjf" ]]; then
       local psz=$(stat -c %s "$tpjf" 2>/dev/null || stat -f %z "$tpjf" 2>/dev/null)
-      $TRASH_CMD "$tpjf"
+      trash_file "$tpjf"
       total_size=$((total_size + psz))
     fi
 
@@ -415,7 +443,7 @@ execute_selected() {
     did_something=true
   done
 
-  for i in $(seq 0 $((ORPHAN_COUNT - 1))); do
+  for ((i=0; i<ORPHAN_COUNT; i++)); do
     [[ "${ORPHAN_SELECTED[$i]}" == "true" ]] || continue
 
     local id="${ORPHAN_IDS[$i]}"
@@ -436,7 +464,7 @@ execute_selected() {
 
       for f in "$SESSION_DIR"/*.deleted.*; do
         [[ -f "$f" ]] || continue
-        $TRASH_CMD "$f"
+        trash_file "$f"
         total_trashed=$((total_trashed + 1))
 
         local bn=$(basename "$f")
@@ -444,20 +472,20 @@ execute_selected() {
 
         local tjf="$SESSION_DIR/${baseid}.trajectory.jsonl"
         if [[ -f "$tjf" ]]; then
-          $TRASH_CMD "$tjf"
+          trash_file "$tjf"
           total_trashed=$((total_trashed + 1))
         fi
 
         local tpjf="$SESSION_DIR/${baseid}.trajectory-path.json"
         if [[ -f "$tpjf" ]]; then
-          $TRASH_CMD "$tpjf"
+          trash_file "$tpjf"
           total_trashed=$((total_trashed + 1))
         fi
       done
 
       for f in "$SESSION_DIR"/*.bak*; do
         [[ -f "$f" ]] || continue
-        $TRASH_CMD "$f"
+        trash_file "$f"
         total_trashed=$((total_trashed + 1))
       done
 
@@ -504,7 +532,8 @@ execute_selected() {
 
 # ── Main ──────────────────────────────────────────────────────────
 gather_data
-MENU_BASE_UP=$(calc_menu_base_up)
+
+TOTAL_ITEMS=$((S_COUNT + ORPHAN_COUNT + 1))
 
 trap 'show_cursor' EXIT INT TERM
 hide_cursor
@@ -525,7 +554,7 @@ while true; do
       fi
       ;;
     $'\x1b[B')
-      if [[ $cursor -lt $((S_COUNT + ORPHAN_COUNT + 1 - 1)) ]]; then
+      if [[ $cursor -lt $((TOTAL_ITEMS - 1)) ]]; then
         old_cursor=$cursor
         cursor=$((cursor + 1))
         update_item_symbol "$old_cursor" "  "

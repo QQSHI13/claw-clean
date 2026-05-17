@@ -9,7 +9,6 @@ Interactive session cleanup tool for [OpenClaw](https://openclaw.org).
 - **Orphaned session detection** — finds sessions in `sessions.json` with missing files (highlighted in yellow)
 - **Smooth cursor** — only updates changed lines, no full redraw
 - **Space to toggle**, Enter to execute
-- **Dry-run mode** — preview what would be deleted without trashing anything
 - **Auto-detected trash command** — works with `trash`, `trash-put`, or `gio trash`
 - **Cleans trajectory companions** alongside selected sessions
 - **Stale data cleanup** — `.deleted`, `.bak-*`, `archive/`
@@ -33,7 +32,6 @@ npx claw-clean
 ```bash
 claw-clean                # interactive menu
 claw-clean -a dashboard   # target another agent
-claw-clean -d             # dry-run (preview only)
 claw-clean -h             # help
 ```
 

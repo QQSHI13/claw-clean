@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
 # Session Cleanup Tool — @clack/prompts-style TUI in pure bash
-# Version: 1.1.0
-# Usage: clean-sessions.sh [-a agent] [-d] [-h]
+# Version: 1.1.1
+# Usage: claw-clean [-a agent] [-h]
 #
 # Features:
 #   • Smooth cursor movement — only updates changed lines, no full redraw
 #   • Each session is selectable with full ID + identifier displayed
 #   • Orphaned session detection — sessions in sessions.json with no file
 #   • "Clean stale data" option for .deleted, .bak-*, and archive/
-#   • --dry-run mode — preview what would be deleted
 #   • Trajectory companions are cleaned alongside selected sessions
 
 set -euo pipefail
 
 AGENT_ID="main"
-DRY_RUN=false
 
 # ── Detect trash command early ─────────────────────────────────────
 TRASH_CMD=""
@@ -31,17 +29,14 @@ while [[ $# -gt 0 ]]; do
     -a|--agent)
       [[ -n "${2:-}" ]] || { echo "Error: --agent requires a value" >&2; exit 1; }
       AGENT_ID="$2"; shift 2 ;;
-    -d|--dry-run)
-      DRY_RUN=true; shift ;;
     -h|--help)
       cat <<'EOF'
 Session Cleanup Tool
 
-Usage: clean-sessions.sh [-a agent] [-d] [-h]
+Usage: claw-clean [-a agent] [-h]
 
 Flags:
   -a, --agent <id>   Target agent (default: main)
-  -d, --dry-run      Preview what would be deleted without trashing
   -h, --help         Show this help
 
 Interactive controls:
@@ -82,15 +77,6 @@ die() { printf "%sError:%s %s\n" "$_R" "$_N" "$1" >&2; exit 1; }
 info() { printf "%s→%s %s\n" "$_G" "$_N" "$1"; }
 warn() { printf "%s⚠%s %s\n" "$_Y" "$_N" "$1"; }
 
-trash_file() {
-  local f="$1"
-  if [[ "$DRY_RUN" == true ]]; then
-    printf "  %s[DRY-RUN]%s would trash: %s\n" "$_Y" "$_N" "$f"
-  else
-    $TRASH_CMD "$f"
-  fi
-}
-
 fmt() {
   local b=$1
   if command -v numfmt &>/dev/null; then numfmt --to=iec-i --suffix=B "$b"
@@ -110,7 +96,6 @@ sess_status() {
   echo "$s"
 }
 
-# Get session identifier (key) from sessions.json by sessionId
 sess_key() {
   local id=$1
   if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
@@ -120,7 +105,6 @@ sess_key() {
   fi
 }
 
-# Check if a session file exists for a given sessionId
 sess_file_exists() {
   local id=$1
   [[ -f "$SESSION_DIR/${id}.jsonl" ]]
@@ -148,7 +132,6 @@ declare -a SESS_AGES=()
 declare -a SESS_STATUS=()
 declare -a SESS_SELECTED=()
 
-# Orphaned sessions (in sessions.json but no file)
 declare -a ORPHAN_IDS=()
 declare -a ORPHAN_KEYS=()
 declare -a ORPHAN_SELECTED=()
@@ -191,10 +174,10 @@ gather_data() {
     [[ "$st" == "active" ]] && ACTIVE_C=$((ACTIVE_C + 1))
   done < <(list_sessions)
 
-  # Find orphaned sessions (in sessions.json but no .jsonl file)
   if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
     while IFS= read -r id; do
       [[ -n "$id" ]] || continue
+      [[ "$id" != "null" ]] || continue
       if ! sess_file_exists "$id"; then
         local key=$(sess_key "$id")
         ORPHAN_IDS+=("$id")
@@ -202,10 +185,9 @@ gather_data() {
         ORPHAN_SELECTED+=("false")
         ORPHAN_COUNT=$((ORPHAN_COUNT + 1))
       fi
-    done < <(jq -r '.[].sessionId' "$SESSION_DIR/sessions.json" 2>/dev/null)
+    done < <(jq -r 'to_entries[] | select(.value.sessionId != null) | .value.sessionId' "$SESSION_DIR/sessions.json" 2>/dev/null)
   fi
 
-  # .deleted files + their companions
   for f in "$SESSION_DIR"/*.deleted.*; do
     [[ -f "$f" ]] || continue
     local sz=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)
@@ -227,14 +209,12 @@ gather_data() {
     fi
   done
 
-  # Backup files
   for f in "$SESSION_DIR"/*.bak*; do
     [[ -f "$f" ]] || continue
     local sz=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)
     STALE_SIZE=$((STALE_SIZE + sz)); STALE_COUNT=$((STALE_COUNT + 1))
   done
 
-  # Archive folder
   if [[ -d "$ARCHIVE_DIR" ]]; then
     for f in "$ARCHIVE_DIR"/*; do
       [[ -f "$f" ]] || continue
@@ -248,20 +228,16 @@ gather_data() {
 hide_cursor() { printf '\033[?25l'; }
 show_cursor() { printf '\033[?25h'; }
 
-# Menu layout:
-#   line 0: blank
-#   line 1: ? Select...
-#   line 2: blank
-#   line 3..3+S_COUNT-1: session items
-#   line 3+S_COUNT: orphaned sessions (if any)
-#   line 3+S_COUNT+ORPHAN_COUNT: stale option
-#   line 3+S_COUNT+ORPHAN_COUNT+1: blank
-#   line 3+S_COUNT+ORPHAN_COUNT+2: hint
-#   line 3+S_COUNT+ORPHAN_COUNT+3: cursor here (after \n of hint)
-#
-# From cursor to first item (line 3): up by total_items + 3 lines
+calc_menu_base_up() {
+  local total=7
+  total=$((total + S_COUNT))
+  if [[ $ORPHAN_COUNT -gt 0 ]]; then
+    total=$((total + ORPHAN_COUNT + 3))
+  fi
+  echo $((total - 4))
+}
 
-MENU_BASE_UP=0  # set after gather_data
+MENU_BASE_UP=0
 
 move_to_item() {
   local idx=$1
@@ -273,10 +249,9 @@ move_to_bottom_from() {
   printf '\033[%dB' "$((MENU_BASE_UP - idx))"
 }
 
-# Update just the prefix + symbol of a menu item (no full redraw)
 update_item_symbol() {
   local idx=$1
-  local prefix=$2   # "> " or "  "
+  local prefix=$2
 
   move_to_item "$idx"
 
@@ -298,11 +273,9 @@ update_item_symbol() {
   move_to_bottom_from "$idx"
 }
 
-# ── Print header (static, never redrawn) ──────────────────────────
 print_header() {
   printf "\n"
   printf "%sSession Cleanup%s — Agent: %s%s%s\n" "$_B" "$_N" "$_C" "$AGENT_ID" "$_N"
-  [[ "$DRY_RUN" == true ]] && printf "%s[DRY-RUN MODE] Preview only — nothing will be deleted%s\n" "$_Y" "$_N"
   printf "\n"
   printf "  Sessions: %s%d%s (%s%d active%s, %s%d open%s)  %s\n" \
     "$_B" "$S_COUNT" "$_N" "$_G" "$ACTIVE_C" "$_N" "$_R" "$OPEN_C" "$_N" "$(fmt $S_SIZE)"
@@ -310,7 +283,6 @@ print_header() {
   printf "\n"
 }
 
-# ── Initial menu render (printed once) ──────────────────────────
 cursor=0
 sel_stale=false
 
@@ -319,7 +291,6 @@ render_menu() {
   printf "%s? Select sessions / cleanup actions:%s\n" "$_B" "$_N"
   printf "\n"
 
-  # Session items
   for i in $(seq 0 $((S_COUNT - 1))); do
     local id="${SESS_IDS[$i]}"
     local key="${SESS_KEYS[$i]}"
@@ -338,19 +309,11 @@ render_menu() {
     [[ "$st" == "OPEN" ]] && st_color="$_R"
     [[ "$st" == "active" ]] && st_color="$_G"
 
-    local line=""
-    line+="${prefix}"
-    line+="${symbol} "
-    line+="${id} "
-    if [[ -n "$key" ]]; then
-      line+="${_D}${key}${_N} "
-    fi
-    line+="${_D}$(fmt $sz)${_N} "
-    line+="(${ag}d, ${st_color}${st}${_N})"
-    printf "%s\n" "$line"
+    printf "%s%s %s " "$prefix" "$symbol" "$id"
+    [[ -n "$key" ]] && printf "%s%s%s " "$_D" "$key" "$_N"
+    printf "%s%s%s (%sd, %s%s%s)\n" "$_D" "$(fmt $sz)" "$_N" "$ag" "$st_color" "$st" "$_N"
   done
 
-  # Orphaned sessions (displayed at bottom in yellow)
   if [[ $ORPHAN_COUNT -gt 0 ]]; then
     printf "\n"
     printf "%s? Orphaned sessions (in sessions.json, file missing):%s\n" "$_Y" "$_N"
@@ -367,19 +330,12 @@ render_menu() {
       local symbol="○"
       [[ "$sel" == "true" ]] && symbol="●"
 
-      local line=""
-      line+="${prefix}"
-      line+="${symbol} "
-      line+="${_Y}${id}${_N} "
-      if [[ -n "$key" ]]; then
-        line+="${_D}${key}${_N} "
-      fi
-      line+="${_D}(orphaned)${_N}"
-      printf "%s\n" "$line"
+      printf "%s%s %s%s%s " "$prefix" "$symbol" "$_Y" "$id" "$_N"
+      [[ -n "$key" ]] && printf "%s%s%s " "$_D" "$key" "$_N"
+      printf "%s(orphaned)%s\n" "$_D" "$_N"
     done
   fi
 
-  # Stale option
   local stale_idx=$((S_COUNT + ORPHAN_COUNT))
   local prefix="  "
   [[ $cursor -eq $stale_idx ]] && prefix="${_C}>${_N} "
@@ -402,17 +358,11 @@ render_menu() {
   printf "  %s↑↓ navigate  Space toggle  Enter execute  q quit%s\n" "$_D" "$_N"
 }
 
-# ── Read key (with retry loop for escape sequences) ─────────────────
 read_key() {
   local key
-
-  # Read first byte
   IFS= read -rs -n1 key
-
-  # If escape character, try to read the full escape sequence
   if [[ "$key" == $'\x1b' ]]; then
     local rest=""
-    # Try up to 3 times with 20ms timeout to get the full sequence
     for _ in {1..3}; do
       if IFS= read -rs -t 0.02 -n1 next 2>/dev/null; then
         rest+="$next"
@@ -421,17 +371,14 @@ read_key() {
     done
     key="$key$rest"
   fi
-
   printf '%s' "$key"
 }
 
-# ── Execute selected ──────────────────────────────────────────────
 execute_selected() {
   local did_something=false
   local total_trashed=0
   local total_size=0
 
-  # Trash selected sessions + their trajectory companions
   for i in $(seq 0 $((S_COUNT - 1))); do
     [[ "${SESS_SELECTED[$i]}" == "true" ]] || continue
 
@@ -441,28 +388,24 @@ execute_selected() {
 
     printf "\n%sTrashing session %s%s%s (%s)%s\n" "$_B" "$_C" "$id" "$_N" "$(fmt $sz)" "$_N"
 
-    # Main session file
-    trash_file "$f"
+    $TRASH_CMD "$f"
     total_trashed=$((total_trashed + 1))
     total_size=$((total_size + sz))
 
-    # Trajectory file
     local tjf="$SESSION_DIR/${id}.trajectory.jsonl"
     if [[ -f "$tjf" ]]; then
       local tsz=$(stat -c %s "$tjf" 2>/dev/null || stat -f %z "$tjf" 2>/dev/null)
-      trash_file "$tjf"
+      $TRASH_CMD "$tjf"
       total_size=$((total_size + tsz))
     fi
 
-    # Trajectory-path file
     local tpjf="$SESSION_DIR/${id}.trajectory-path.json"
     if [[ -f "$tpjf" ]]; then
       local psz=$(stat -c %s "$tpjf" 2>/dev/null || stat -f %z "$tpjf" 2>/dev/null)
-      trash_file "$tpjf"
+      $TRASH_CMD "$tpjf"
       total_size=$((total_size + psz))
     fi
 
-    # Remove from sessions.json
     if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
       local tmpjson=$(mktemp)
       jq --arg sid "$id" 'with_entries(select(.value.sessionId != $sid))' \
@@ -472,7 +415,6 @@ execute_selected() {
     did_something=true
   done
 
-  # Remove orphaned sessions from sessions.json
   for i in $(seq 0 $((ORPHAN_COUNT - 1))); do
     [[ "${ORPHAN_SELECTED[$i]}" == "true" ]] || continue
 
@@ -488,15 +430,13 @@ execute_selected() {
     fi
   done
 
-  # Clean stale data
   if [[ "$sel_stale" == true ]]; then
     if [[ $STALE_COUNT -gt 0 ]]; then
       printf "\n%sCleaning stale data%s — %d items, %s\n" "$_B" "$_N" "$STALE_COUNT" "$(fmt $STALE_SIZE)"
 
-      # .deleted files + companions
       for f in "$SESSION_DIR"/*.deleted.*; do
         [[ -f "$f" ]] || continue
-        trash_file "$f"
+        $TRASH_CMD "$f"
         total_trashed=$((total_trashed + 1))
 
         local bn=$(basename "$f")
@@ -504,34 +444,27 @@ execute_selected() {
 
         local tjf="$SESSION_DIR/${baseid}.trajectory.jsonl"
         if [[ -f "$tjf" ]]; then
-          trash_file "$tjf"
+          $TRASH_CMD "$tjf"
           total_trashed=$((total_trashed + 1))
         fi
 
         local tpjf="$SESSION_DIR/${baseid}.trajectory-path.json"
         if [[ -f "$tpjf" ]]; then
-          trash_file "$tpjf"
+          $TRASH_CMD "$tpjf"
           total_trashed=$((total_trashed + 1))
         fi
       done
 
-      # Backup files
       for f in "$SESSION_DIR"/*.bak*; do
         [[ -f "$f" ]] || continue
-        trash_file "$f"
+        $TRASH_CMD "$f"
         total_trashed=$((total_trashed + 1))
       done
 
-      # Archive folder
       if [[ -d "$ARCHIVE_DIR" ]]; then
-        if [[ "$DRY_RUN" == true ]]; then
-          printf "  %s[DRY-RUN]%s would trash archive folder: %s\n" "$_Y" "$_N" "$ARCHIVE_DIR"
-        else
-          $TRASH_CMD "$ARCHIVE_DIR"
-        fi
+        $TRASH_CMD "$ARCHIVE_DIR"
       fi
 
-      # Clean sessions.json of deleted session references
       if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
         local tmpjson=$(mktemp)
         local ids=()
@@ -563,11 +496,7 @@ execute_selected() {
   fi
 
   if [[ "$did_something" == true ]]; then
-    if [[ "$DRY_RUN" == true ]]; then
-      printf "\n%s[DRY-RUN complete]%s Would have processed %d items (%s total).\n" "$_Y" "$_N" "$total_trashed" "$(fmt $total_size)"
-    else
-      printf "\n%sDone.%s Trashed %d items (%s total).\n" "$_G" "$_N" "$total_trashed" "$(fmt $total_size)"
-    fi
+    printf "\n%sDone.%s Trashed %d items (%s total).\n" "$_G" "$_N" "$total_trashed" "$(fmt $total_size)"
   else
     printf "\n%sNothing selected.%s\n" "$_Y" "$_N"
   fi
@@ -575,25 +504,19 @@ execute_selected() {
 
 # ── Main ──────────────────────────────────────────────────────────
 gather_data
-TOTAL_ITEMS=$((S_COUNT + ORPHAN_COUNT + 1))
-MENU_BASE_UP=$((TOTAL_ITEMS + 3))
+MENU_BASE_UP=$(calc_menu_base_up)
 
-# Hide cursor, trap to restore
 trap 'show_cursor' EXIT INT TERM
 hide_cursor
 
-# Print static header + table
 print_header
-
-# Initial menu render
 render_menu
 
-# Input loop — smooth updates, no full redraw
 while true; do
   key=$(read_key)
 
   case "$key" in
-    $'\x1b[A')  # Up
+    $'\x1b[A')
       if [[ $cursor -gt 0 ]]; then
         old_cursor=$cursor
         cursor=$((cursor - 1))
@@ -601,15 +524,15 @@ while true; do
         update_item_symbol "$cursor" "> "
       fi
       ;;
-    $'\x1b[B')  # Down
-      if [[ $cursor -lt $((TOTAL_ITEMS - 1)) ]]; then
+    $'\x1b[B')
+      if [[ $cursor -lt $((S_COUNT + ORPHAN_COUNT + 1 - 1)) ]]; then
         old_cursor=$cursor
         cursor=$((cursor + 1))
         update_item_symbol "$old_cursor" "  "
         update_item_symbol "$cursor" "> "
       fi
       ;;
-    ' '|$'\x20')  # Space
+    ' '|$'\x20')
       if [[ $cursor -lt $S_COUNT ]]; then
         if [[ "${SESS_SELECTED[$cursor]}" == "true" ]]; then
           SESS_SELECTED[$cursor]="false"
@@ -630,12 +553,12 @@ while true; do
         update_item_symbol "$cursor" "> "
       fi
       ;;
-    ''|$'\x0a'|$'\x0d')  # Enter
+    ''|$'\x0a'|$'\x0d')
       printf '\n\n'
       execute_selected
       exit 0
       ;;
-    'q'|'Q'|$'\x03')  # q or Ctrl+C
+    'q'|'Q'|$'\x03')
       exit 0
       ;;
     *)

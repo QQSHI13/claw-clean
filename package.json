@@ -1,7 +1,7 @@
 {
   "name": "claw-clean",
-  "version": "1.1.0",
-  "description": "Interactive session cleanup tool for OpenClaw — TUI menu with arrow-key navigation, orphaned session detection, and dry-run mode",
+  "version": "1.1.1",
+  "description": "Interactive session cleanup tool for OpenClaw — TUI menu with arrow-key navigation and orphaned session detection",
   "main": "claw-clean.sh",
   "bin": {
     "claw-clean": "claw-clean.sh"
@@ -25,8 +25,7 @@
     "cli",
     "tui",
     "interactive",
-    "orphaned",
-    "dry-run"
+    "orphaned"
   ],
   "author": "QQSHI13",
   "license": "GPL-3.0",

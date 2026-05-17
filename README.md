@@ -6,12 +6,15 @@ Interactive session cleanup tool for [OpenClaw](https://openclaw.org).
 
 - **TUI menu** with arrow-key navigation (inspired by `@clack/prompts`)
 - **Selectable sessions** — each session listed with full UUID + identifier
+- **Orphaned session detection** — finds sessions in `sessions.json` with missing files (highlighted in yellow)
 - **Smooth cursor** — only updates changed lines, no full redraw
 - **Space to toggle**, Enter to execute
+- **Dry-run mode** — preview what would be deleted without trashing anything
+- **Auto-detected trash command** — works with `trash`, `trash-put`, or `gio trash`
 - **Cleans trajectory companions** alongside selected sessions
 - **Stale data cleanup** — `.deleted`, `.bak-*`, `archive/`
-- **Cleans `sessions.json`** — removes deleted session references
-- **Color-coded status** — OPEN (red), active (green), inactive (default)
+- **Cleans `sessions.json`** — removes deleted and orphaned session references
+- **Color-coded status** — OPEN (red), active (green), orphaned (yellow), inactive (default)
 
 ## Installation
 
@@ -30,6 +33,7 @@ npx claw-clean
 ```bash
 claw-clean                # interactive menu
 claw-clean -a dashboard   # target another agent
+claw-clean -d             # dry-run (preview only)
 claw-clean -h             # help
 ```
 
@@ -44,13 +48,16 @@ claw-clean -h             # help
 
 ### What It Cleans
 
-When you select a session and press Enter:
+**Regular sessions:**
 - The `.jsonl` session file
 - Its `.trajectory.jsonl` companion
 - Its `.trajectory-path.json` companion
 - Entry removed from `sessions.json`
 
-When you select "Clean stale data":
+**Orphaned sessions** (in `sessions.json` but file missing):
+- Entry removed from `sessions.json` only (no file to trash)
+
+**Stale data:**
 - `.deleted.*` files + their trajectory companions
 - `.bak-*` backup files
 - `archive/` folder
@@ -58,7 +65,7 @@ When you select "Clean stale data":
 ## Requirements
 
 - `bash` (4.0+)
-- `trash-cli` (`pip install trash-cli`)
+- One of: `trash` (trash-cli), `trash-put`, or `gio trash`
 - `jq` (optional, for `sessions.json` cleanup)
 
 ## License

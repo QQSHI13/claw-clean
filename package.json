@@ -1,6 +1,6 @@
 {
   "name": "claw-clean",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Interactive session cleanup tool for OpenClaw — TUI menu with arrow-key navigation and orphaned session detection",
   "main": "claw-clean.sh",
   "bin": {

@@ -14,10 +14,16 @@ set -euo pipefail
 AGENT_ID="main"
 
 # ── Detect trash command early ─────────────────────────────────────
-TRASH_CMD=""
+TRASH_CMD=()
 for cmd in trash trash-put "gio trash"; do
-  if command -v $cmd &>/dev/null; then
-    TRASH_CMD="$cmd"
+  if [[ "$cmd" == *" "* ]]; then
+    local first="${cmd%% *}" rest="${cmd#* }"
+    if command -v "$first" &>/dev/null; then
+      TRASH_CMD=("$first" "$rest")
+      break
+    fi
+  elif command -v "$cmd" &>/dev/null; then
+    TRASH_CMD=("$cmd")
     break
   fi
 done
@@ -41,8 +47,9 @@ Flags:
 Interactive controls:
   ↑ / ↓     Navigate options
   Space     Toggle selection
-  Enter     Execute selected items
-  q / Ctrl+C  Quit without doing anything
+  Enter     Execute selected items (with confirmation)
+  q         Quit without doing anything
+  Ctrl+C    Interrupt and quit
 EOF
       exit 0
       ;;
@@ -51,7 +58,7 @@ EOF
 done
 
 # ── Validate requirements ───────────────────────────────────────────
-[[ -n "$TRASH_CMD" ]] || { echo "Error: No trash command found. Install trash-cli: pip install trash-cli" >&2; exit 1; }
+[[ ${#TRASH_CMD[@]} -gt 0 ]] || { echo "Error: No trash command found. Install trash-cli: pip install trash-cli" >&2; exit 1; }
 
 STATE_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
 SESSION_DIR="$STATE_DIR/agents/$AGENT_ID/sessions"
@@ -103,6 +110,7 @@ sess_file_exists() {
 }
 
 list_sessions() {
+  shopt -s nullglob
   for f in "$SESSION_DIR"/*.jsonl; do
     [[ -f "$f" ]] || continue
     [[ "$f" == *.trajectory.jsonl ]] && continue
@@ -113,6 +121,7 @@ list_sessions() {
     [[ "$bn" == *.deleted.* ]] && continue
     echo "$f"
   done
+  shopt -u nullglob
 }
 
 # ── Data gathering ────────────────────────────────────────────────
@@ -191,13 +200,13 @@ gather_data() {
     local tjf="$SESSION_DIR/${baseid}.trajectory.jsonl"
     if [[ -f "$tjf" ]]; then
       local tsz=$(stat -c %s "$tjf" 2>/dev/null || stat -f %z "$tjf" 2>/dev/null)
-      STALE_SIZE=$((STALE_SIZE + tsz)); STALE_COUNT=$((STALE_COUNT + 1))
+      STALE_SIZE=$((STALE_SIZE + tsz))
     fi
 
     local tpjf="$SESSION_DIR/${baseid}.trajectory-path.json"
     if [[ -f "$tpjf" ]]; then
       local psz=$(stat -c %s "$tpjf" 2>/dev/null || stat -f %z "$tpjf" 2>/dev/null)
-      STALE_SIZE=$((STALE_SIZE + psz)); STALE_COUNT=$((STALE_COUNT + 1))
+      STALE_SIZE=$((STALE_SIZE + psz))
     fi
   done
 
@@ -208,11 +217,13 @@ gather_data() {
   done
 
   if [[ -d "$ARCHIVE_DIR" ]]; then
+    shopt -s nullglob
     for f in "$ARCHIVE_DIR"/*; do
       [[ -f "$f" ]] || continue
       local sz=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)
       STALE_SIZE=$((STALE_SIZE + sz)); STALE_COUNT=$((STALE_COUNT + 1))
     done
+    shopt -u nullglob
   fi
 
   # Build ITEM_LINE mapping: item index -> line offset from first item
@@ -253,7 +264,8 @@ gather_data() {
   
   # Lines from first item to cursor (after hint line)
   # After stale: blank + hint = 2 more lines
-  MENU_BASE_UP=$((line + 2))
+  # Add 1 extra because cursor sits on hint line, and we need to move from cursor to first item
+  MENU_BASE_UP=$((line + 3))
 }
 
 # ── TUI helpers ───────────────────────────────────────────────────
@@ -399,13 +411,44 @@ read_key() {
 
 trash_file() {
   local f="$1"
-  $TRASH_CMD "$f"
+  "${TRASH_CMD[@]}" "$f"
 }
 
 execute_selected() {
   local did_something=false
   local total_trashed=0
   local total_size=0
+  local has_open=false
+
+  # Check if any OPEN sessions selected
+  for ((i=0; i<S_COUNT; i++)); do
+    [[ "${SESS_SELECTED[$i]}" == "true" ]] || continue
+    [[ "${SESS_STATUS[$i]}" == "OPEN" ]] && has_open=true
+  done
+
+  # Confirmation prompt
+  local selected_count=0
+  for ((i=0; i<S_COUNT; i++)); do
+    [[ "${SESS_SELECTED[$i]}" == "true" ]] && selected_count=$((selected_count + 1))
+  done
+  for ((i=0; i<ORPHAN_COUNT; i++)); do
+    [[ "${ORPHAN_SELECTED[$i]}" == "true" ]] && selected_count=$((selected_count + 1))
+  done
+  [[ "$sel_stale" == true ]] && selected_count=$((selected_count + 1))
+
+  if [[ $selected_count -eq 0 ]]; then
+    printf "\n%sNothing selected.%s\n" "$_Y" "$_N"
+    return
+  fi
+
+  printf "\n%s%d item(s) selected for cleanup.%s" "$_B" "$selected_count" "$_N"
+  [[ "$has_open" == true ]] && printf " %s(WARNING: open sessions selected)%s" "$_R" "$_N"
+  printf "\n%sProceed? [y/N]:%s " "$_D" "$_N"
+  show_cursor
+  local confirm
+  read -r confirm
+  hide_cursor
+  [[ "$confirm" == [yY]* ]] || { printf "%sCancelled.%s\n" "$_Y" "$_N"; return; }
 
   for ((i=0; i<S_COUNT; i++)); do
     [[ "${SESS_SELECTED[$i]}" == "true" ]] || continue
@@ -462,6 +505,7 @@ execute_selected() {
     if [[ $STALE_COUNT -gt 0 ]]; then
       printf "\n%sCleaning stale data%s — %d items, %s\n" "$_B" "$_N" "$STALE_COUNT" "$(fmt $STALE_SIZE)"
 
+      shopt -s nullglob
       for f in "$SESSION_DIR"/*.deleted.*; do
         [[ -f "$f" ]] || continue
         trash_file "$f"
@@ -482,15 +526,18 @@ execute_selected() {
           total_trashed=$((total_trashed + 1))
         fi
       done
+      shopt -u nullglob
 
+      shopt -s nullglob
       for f in "$SESSION_DIR"/*.bak*; do
         [[ -f "$f" ]] || continue
         trash_file "$f"
         total_trashed=$((total_trashed + 1))
       done
+      shopt -u nullglob
 
       if [[ -d "$ARCHIVE_DIR" ]]; then
-        $TRASH_CMD "$ARCHIVE_DIR"
+        "${TRASH_CMD[@]}" "$ARCHIVE_DIR"
       fi
 
       if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
@@ -570,7 +617,7 @@ while true; do
         fi
         update_item_symbol "$cursor" "> "
       elif [[ $cursor -lt $((S_COUNT + ORPHAN_COUNT)) ]]; then
-        local oidx=$((cursor - S_COUNT))
+        oidx=$((cursor - S_COUNT))
         if [[ "${ORPHAN_SELECTED[$oidx]}" == "true" ]]; then
           ORPHAN_SELECTED[$oidx]="false"
         else

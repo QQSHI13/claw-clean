@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Session Cleanup Tool — @clack/prompts-style TUI in pure bash
-# Version: 1.1.2
+# Version: 1.2.1
 # Usage: claw-clean [-a agent] [-h]
 #
 # Features:

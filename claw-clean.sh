@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Session Cleanup Tool — @clack/prompts-style TUI in pure bash
-# Version: 1.2.1
+# Version: 1.2.2
 # Usage: claw-clean [-a agent] [-h]
 #
 # Features:
@@ -87,10 +87,24 @@ age_days() {
   echo $(( ($(date +%s) - m) / 86400 ))
 }
 
+# Check if a session ID is referenced in sessions.json (by sessionId OR sessionFile)
+sess_is_active() {
+  local id=$1
+  if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
+    # Check if this ID matches any sessionId OR if any sessionFile contains this ID
+    jq -e --arg sid "$id" '
+      to_entries[] | 
+      select(.value.sessionId == $sid or (.value.sessionFile // "" | contains($sid)))
+    ' "$SESSION_DIR/sessions.json" &>/dev/null
+  else
+    [[ -f "$SESSION_DIR/sessions.json" ]] && grep -q "\"$id\"" "$SESSION_DIR/sessions.json" 2>/dev/null
+  fi
+}
+
 sess_status() {
   local id=$1 f="$SESSION_DIR/${id}.jsonl"
   local s="inactive"
-  [[ -f "$SESSION_DIR/sessions.json" ]] && grep -q "\"$id\"" "$SESSION_DIR/sessions.json" 2>/dev/null && s="active"
+  sess_is_active "$id" && s="active"
   [[ -f "$f.lock" ]] && s="OPEN"
   echo "$s"
 }
@@ -98,7 +112,20 @@ sess_status() {
 sess_key() {
   local id=$1
   if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
-    jq -r --arg sid "$id" 'to_entries[] | select(.value.sessionId == $sid) | .key' "$SESSION_DIR/sessions.json" 2>/dev/null | head -1
+    jq -r --arg sid "$id" '
+      to_entries[] | 
+      select(.value.sessionId == $sid or (.value.sessionFile // "" | contains($sid))) | 
+      .key' "$SESSION_DIR/sessions.json" 2>/dev/null | head -1
+  else
+    echo ""
+  fi
+}
+
+# Get the sessionFile path for a given sessionId from sessions.json
+sess_file_for_id() {
+  local id=$1
+  if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
+    jq -r --arg sid "$id" 'to_entries[] | select(.value.sessionId == $sid) | .value.sessionFile' "$SESSION_DIR/sessions.json" 2>/dev/null | head -1
   else
     echo ""
   fi
@@ -106,7 +133,11 @@ sess_key() {
 
 sess_file_exists() {
   local id=$1
-  [[ -f "$SESSION_DIR/${id}.jsonl" ]]
+  # Check both direct file AND sessionFile reference in sessions.json
+  [[ -f "$SESSION_DIR/${id}.jsonl" ]] && return 0
+  local sf=$(sess_file_for_id "$id")
+  [[ -n "$sf" ]] && [[ -f "$sf" ]] && return 0
+  return 1
 }
 
 list_sessions() {
@@ -152,6 +183,9 @@ gather_data() {
   ORPHAN_IDS=(); ORPHAN_KEYS=(); ORPHAN_SELECTED=()
   ITEM_LINE=()
 
+  # Track which sessionIds we've already seen to avoid duplicates
+  declare -A SEEN_IDS
+
   while IFS= read -r f; do
     [[ -f "$f" ]] || continue
     local sz=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)
@@ -167,17 +201,22 @@ gather_data() {
     SESS_AGES+=("$ag")
     SESS_STATUS+=("$st")
     SESS_SELECTED+=("false")
+    SEEN_IDS["$id"]=1
 
     S_SIZE=$((S_SIZE + sz)); S_COUNT=$((S_COUNT + 1))
     [[ "$st" == "OPEN" ]] && OPEN_C=$((OPEN_C + 1))
     [[ "$st" == "active" ]] && ACTIVE_C=$((ACTIVE_C + 1))
   done < <(list_sessions)
 
-  # Find orphaned sessions
+  # Find orphaned sessions — sessions in sessions.json whose sessionId has no matching file
+  # AND whose sessionFile also doesn't exist
   if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
     while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       [[ "$id" != "null" ]] || continue
+      # Skip if we already have this as a session file
+      [[ -n "${SEEN_IDS[$id]:-}" ]] && continue
+      # Check if file exists (direct or via sessionFile)
       if ! sess_file_exists "$id"; then
         local key=$(sess_key "$id")
         ORPHAN_IDS+=("$id")
@@ -395,11 +434,16 @@ render_menu() {
 
 read_key() {
   local key
-  IFS= read -rs -n1 key
+  # Read first byte with timeout to avoid blocking forever if terminal sends nothing
+  if ! IFS= read -rs -t 1 -n1 key 2>/dev/null; then
+    return 1
+  fi
+  
   if [[ "$key" == $'\x1b' ]]; then
     local rest=""
+    # Read up to 2 more bytes with longer timeout (200ms) to handle slow terminals
     for _ in {1..3}; do
-      if IFS= read -rs -t 0.02 -n1 next 2>/dev/null; then
+      if IFS= read -rs -t 0.2 -n1 next 2>/dev/null; then
         rest+="$next"
         [[ ${#rest} -eq 2 ]] && break
       fi
@@ -411,7 +455,14 @@ read_key() {
 
 trash_file() {
   local f="$1"
-  "${TRASH_CMD[@]}" "$f"
+  if [[ ! -f "$f" ]] && [[ ! -d "$f" ]]; then
+    printf "%sWarning: %s does not exist, skipping%s\n" "$_Y" "$f" "$_N" >&2
+    return 1
+  fi
+  "${TRASH_CMD[@]}" "$f" || {
+    printf "%sError: Failed to trash %s%s\n" "$_R" "$f" "$_N" >&2
+    return 1
+  }
 }
 
 execute_selected() {
@@ -459,28 +510,35 @@ execute_selected() {
 
     printf "\n%sTrashing session %s%s%s (%s)%s\n" "$_B" "$_C" "$id" "$_N" "$(fmt $sz)" "$_N"
 
-    trash_file "$f"
+    trash_file "$f" || continue
     total_trashed=$((total_trashed + 1))
     total_size=$((total_size + sz))
 
     local tjf="$SESSION_DIR/${id}.trajectory.jsonl"
     if [[ -f "$tjf" ]]; then
       local tsz=$(stat -c %s "$tjf" 2>/dev/null || stat -f %z "$tjf" 2>/dev/null)
-      trash_file "$tjf"
+      trash_file "$tjf" || true
       total_size=$((total_size + tsz))
     fi
 
     local tpjf="$SESSION_DIR/${id}.trajectory-path.json"
     if [[ -f "$tpjf" ]]; then
       local psz=$(stat -c %s "$tpjf" 2>/dev/null || stat -f %z "$tpjf" 2>/dev/null)
-      trash_file "$tpjf"
+      trash_file "$tpjf" || true
       total_size=$((total_size + psz))
     fi
 
     if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
       local tmpjson=$(mktemp)
-      jq --arg sid "$id" 'with_entries(select(.value.sessionId != $sid))' \
-        "$SESSION_DIR/sessions.json" > "$tmpjson" 2>/dev/null && mv "$tmpjson" "$SESSION_DIR/sessions.json"
+      # Remove by sessionId OR by sessionFile containing this ID
+      jq --arg sid "$id" '
+        with_entries(
+          select(
+            .value.sessionId != $sid and
+            ((.value.sessionFile // "") | contains($sid) | not)
+          )
+        )
+      ' "$SESSION_DIR/sessions.json" > "$tmpjson" 2>/dev/null && mv "$tmpjson" "$SESSION_DIR/sessions.json"
     fi
 
     did_something=true
@@ -497,6 +555,7 @@ execute_selected() {
       jq --arg sid "$id" 'with_entries(select(.value.sessionId != $sid))' \
         "$SESSION_DIR/sessions.json" > "$tmpjson" 2>/dev/null && mv "$tmpjson" "$SESSION_DIR/sessions.json"
       total_trashed=$((total_trashed + 1))
+
       did_something=true
     fi
   done
@@ -508,7 +567,7 @@ execute_selected() {
       shopt -s nullglob
       for f in "$SESSION_DIR"/*.deleted.*; do
         [[ -f "$f" ]] || continue
-        trash_file "$f"
+        trash_file "$f" || continue
         total_trashed=$((total_trashed + 1))
 
         local bn=$(basename "$f")
@@ -516,13 +575,13 @@ execute_selected() {
 
         local tjf="$SESSION_DIR/${baseid}.trajectory.jsonl"
         if [[ -f "$tjf" ]]; then
-          trash_file "$tjf"
+          trash_file "$tjf" || true
           total_trashed=$((total_trashed + 1))
         fi
 
         local tpjf="$SESSION_DIR/${baseid}.trajectory-path.json"
         if [[ -f "$tpjf" ]]; then
-          trash_file "$tpjf"
+          trash_file "$tpjf" || true
           total_trashed=$((total_trashed + 1))
         fi
       done
@@ -531,13 +590,13 @@ execute_selected() {
       shopt -s nullglob
       for f in "$SESSION_DIR"/*.bak*; do
         [[ -f "$f" ]] || continue
-        trash_file "$f"
+        trash_file "$f" || continue
         total_trashed=$((total_trashed + 1))
       done
       shopt -u nullglob
 
       if [[ -d "$ARCHIVE_DIR" ]]; then
-        "${TRASH_CMD[@]}" "$ARCHIVE_DIR"
+        trash_file "$ARCHIVE_DIR" || true
       fi
 
       if [[ -f "$SESSION_DIR/sessions.json" ]] && command -v jq &>/dev/null; then
@@ -592,7 +651,7 @@ while true; do
   key=$(read_key)
 
   case "$key" in
-    $'\x1b[A')
+    $'\x1b[A'|$'\x1bOA')
       if [[ $cursor -gt 0 ]]; then
         old_cursor=$cursor
         cursor=$((cursor - 1))
@@ -600,7 +659,7 @@ while true; do
         update_item_symbol "$cursor" "${_C}>${_N} "
       fi
       ;;
-    $'\x1b[B')
+    $'\x1b[B'|$'\x1bOB')
       if [[ $cursor -lt $((TOTAL_ITEMS - 1)) ]]; then
         old_cursor=$cursor
         cursor=$((cursor + 1))

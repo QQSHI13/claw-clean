@@ -303,8 +303,8 @@ gather_data() {
   
   # Lines from first item to cursor (after hint line)
   # After stale: blank + hint = 2 more lines
-  # Add 2 extra for the blank before "? Select..." and "? Select..." itself
-  MENU_BASE_UP=$((line + 2))
+  # Add 1 extra because cursor sits on hint line, and we need to move from cursor to first item
+  MENU_BASE_UP=$((line + 1))
 }
 
 # ── TUI helpers ───────────────────────────────────────────────────

@@ -266,16 +266,16 @@ gather_data() {
   fi
 
   # Build ITEM_LINE mapping: item index -> line offset from first item
-  # render_menu layout (counting from first session line):
-  #   -2: blank (before "? Select...")
-  #   -1: "? Select..."
+  # render_menu layout:
   #   line 0: blank
-  #   line 1..1+S_COUNT-1: sessions
+  #   line 1: "? Select..."
+  #   line 2: blank
+  #   line 3..3+S_COUNT-1: sessions
   #   [if orphans:]
-  #     line 1+S_COUNT: blank
-  #     line 1+S_COUNT+1: "? Orphaned..."
-  #     line 1+S_COUNT+2: blank
-  #     line 1+S_COUNT+3 .. +1+ORPHAN_COUNT-1: orphans
+  #     line 3+S_COUNT: blank
+  #     line 3+S_COUNT+1: "? Orphaned..."
+  #     line 3+S_COUNT+2: blank
+  #     line 3+S_COUNT+3 .. +3+ORPHAN_COUNT-1: orphans
   #   line after orphans/sessions: blank
   #   next: stale option
   #   next: blank
@@ -304,7 +304,7 @@ gather_data() {
   # Lines from first item to cursor (after hint line)
   # After stale: blank + hint = 2 more lines
   # Add 1 extra because cursor sits on hint line, and we need to move from cursor to first item
-  MENU_BASE_UP=$((line + 1))
+  MENU_BASE_UP=$((line + 3))
 }
 
 # ── TUI helpers ───────────────────────────────────────────────────

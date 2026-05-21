@@ -434,12 +434,14 @@ render_menu() {
 
 read_key() {
   local key
-  # Read first byte - block indefinitely until key pressed
-  IFS= read -rs -n1 key
+  # Read first byte with timeout to avoid blocking forever if terminal sends nothing
+  if ! IFS= read -rs -t 1 -n1 key 2>/dev/null; then
+    return 1
+  fi
   
   if [[ "$key" == $'\x1b' ]]; then
     local rest=""
-    # Read up to 2 more bytes with timeout (200ms) to handle slow terminals
+    # Read up to 2 more bytes with longer timeout (200ms) to handle slow terminals
     for _ in {1..3}; do
       if IFS= read -rs -t 0.2 -n1 next 2>/dev/null; then
         rest+="$next"

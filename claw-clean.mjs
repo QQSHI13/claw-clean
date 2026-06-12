@@ -20,7 +20,7 @@ import path from "node:path";
 import os from "node:os";
 import process from "node:process";
 
-const VERSION = "2.5.0";
+const VERSION = "2.5.1";
 
 // ── Helpers ────────────────────────────────────────────────────────
 function fmt(bytes) {
@@ -434,7 +434,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
     process.exit(1);
   }
 
-  const sessionsJson = loadSessionsJson(sessionDir);
+  let sessionsJson = loadSessionsJson(sessionDir);
   const { sessions, orphans, staleItems, staleSize, sSize, openC, activeC } =
     gatherData(sessionDir, archiveDir, sessionsJson);
 
@@ -602,6 +602,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
         )
       );
       fs.writeFileSync(p, JSON.stringify(updated, null, 2));
+      sessionsJson = updated;
     }
   }
 
@@ -617,6 +618,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
         Object.entries(sessionsJson).filter(([, v]) => !v || v.sessionId !== o.id)
       );
       fs.writeFileSync(p, JSON.stringify(updated, null, 2));
+      sessionsJson = updated;
       totalTrashed++;
     }
   }

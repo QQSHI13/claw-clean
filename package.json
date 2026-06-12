@@ -1,18 +1,20 @@
 {
   "name": "claw-clean",
-  "version": "1.2.3",
-  "description": "Interactive session cleanup tool for OpenClaw — TUI menu with arrow-key navigation and orphaned session detection",
-  "main": "claw-clean.sh",
+  "version": "2.0.0",
+  "description": "Interactive session cleanup tool for OpenClaw — @clack/prompts TUI",
+  "type": "module",
+  "main": "claw-clean.mjs",
   "bin": {
-    "claw-clean": "claw-clean.sh"
+    "claw-clean": "claw-clean.mjs"
   },
   "files": [
-    "claw-clean.sh",
+    "claw-clean.mjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "echo 'Manual test: ./claw-clean.sh'"
+    "test": "node --check claw-clean.mjs",
+    "start": "node claw-clean.mjs"
   },
   "repository": {
     "type": "git",
@@ -25,11 +27,15 @@
     "cli",
     "tui",
     "interactive",
-    "orphaned"
+    "orphaned",
+    "clack"
   ],
   "author": "QQSHI13",
   "license": "GPL-3.0",
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.5.1"
   }
 }

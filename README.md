@@ -4,9 +4,8 @@ Interactive session cleanup tool for [OpenClaw](https://openclaw.ai).
 
 ## Features
 
-- **TUI menu** with arrow-key navigation (inspired by `@clack/prompts`)
+- **@clack/prompts TUI** — clean, robust menus with proper wrapping and cursor handling
 - **Selectable sessions** — each session listed with full UUID + identifier
-- **Smooth cursor** — only updates changed lines, no full redraw
 - **Space to toggle**, Enter to execute
 - **Auto-detected trash command** — works with `trash`, `trash-put`, or `gio trash`
 - **Cleans trajectory companions** alongside selected sessions
@@ -39,9 +38,9 @@ claw-clean -h             # help
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Navigate sessions |
-| `Space` | Toggle selection (○ ↔ ●) |
-| `Enter` | Execute selected items |
-| `q` / `Ctrl+C` | Quit without doing anything |
+| `Space` | Toggle selection |
+| `Enter` | Submit selections |
+| `Ctrl+C` | Cancel and quit |
 
 ### What It Cleans
 
@@ -61,9 +60,8 @@ claw-clean -h             # help
 
 ## Requirements
 
-- `bash` (4.0+)
+- Node.js `>=18.0.0`
 - One of: `trash` (trash-cli), `trash-put`, or `gio trash`
-- `jq` (optional, for `sessions.json` cleanup)
 
 ## License
 

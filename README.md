@@ -1,6 +1,6 @@
 # claw-clean
 
-Interactive session cleanup tool for [OpenClaw](https://openclaw.org).
+Interactive session cleanup tool for [OpenClaw](https://openclaw.ai).
 
 ## Features
 

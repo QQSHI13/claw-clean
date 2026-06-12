@@ -43,6 +43,23 @@ function ageDays(filePath) {
   }
 }
 
+function dirSize(dir) {
+  let total = 0;
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        total += dirSize(p);
+      } else if (entry.isFile()) {
+        total += fs.statSync(p).size;
+      }
+    }
+  } catch {
+    // ignore unreadable paths
+  }
+  return total;
+}
+
 function commandExists(cmd) {
   const [first] = cmd.split(" ");
   try {
@@ -374,6 +391,16 @@ async function main() {
     }));
   }
 
+  const agentDir = path.join(stateDir, "agents", AGENT_ID);
+  const agentSize = dirSize(agentDir);
+  groups["Agent"] = [
+    {
+      value: "agent:delete",
+      label: `Delete entire agent: ${AGENT_ID}`,
+      hint: `moves whole agent to trash — ${fmt(agentSize)}`,
+    },
+  ];
+
   let selected = [];
   if (Object.keys(groups).length > 0) {
     selected = await groupMultiselect({
@@ -401,13 +428,17 @@ async function main() {
   }
 
   const selectedValues = Array.from(expanded);
-  const selectedIds = selectedValues.filter((v) => !v.startsWith("orphan:") && !v.startsWith("stale:"));
+  const selectedIds = selectedValues.filter(
+    (v) => !v.startsWith("orphan:") && !v.startsWith("stale:") && !v.startsWith("agent:")
+  );
   const selectedOrphanIds = selectedValues
     .filter((v) => v.startsWith("orphan:"))
     .map((v) => v.slice("orphan:".length));
   const selectedStaleValues = new Set(selectedValues.filter((v) => v.startsWith("stale:")));
+  const deleteAgent = selectedValues.includes("agent:delete");
 
-  const totalCount = selectedIds.length + selectedOrphanIds.length + selectedStaleValues.size;
+  const totalCount =
+    selectedIds.length + selectedOrphanIds.length + selectedStaleValues.size + (deleteAgent ? 1 : 0);
 
   if (totalCount === 0) {
     outro("Nothing selected.");
@@ -419,6 +450,7 @@ async function main() {
   const confirmed = await confirm({
     message:
       `${totalCount} item(s) selected for cleanup.` +
+      (deleteAgent ? " (WARNING: entire agent will be deleted)" : "") +
       (hasOpen ? " (WARNING: open sessions selected)" : "") +
       " Proceed?",
     initialValue: false,
@@ -431,6 +463,17 @@ async function main() {
 
   let totalTrashed = 0;
   let totalSize = 0;
+
+  // Delete entire agent
+  if (deleteAgent) {
+    log.step(`Trashing entire agent: ${AGENT_ID} (${fmt(agentSize)})`);
+    if (await trashFile(trashCmd, agentDir)) {
+      totalTrashed++;
+      totalSize += agentSize;
+    }
+    outro(`Done. Trashed ${totalTrashed} items (${fmt(totalSize)} total).`);
+    process.exit(0);
+  }
 
   // Trash sessions
   for (const s of sessions) {

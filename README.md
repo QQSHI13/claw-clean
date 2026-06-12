@@ -57,6 +57,9 @@ claw-clean -h             # help
 - `.bak-*` backup files
 - `archive/` folder
 
+**Whole agent:**
+- Delete the entire `agents/<agent>/` directory
+
 ## Requirements
 
 - Node.js `>=18.0.0`

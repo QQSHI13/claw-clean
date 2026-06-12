@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Session Cleanup Tool — @clack/prompts TUI
-// Version: 2.2.0
-// Usage: claw-clean [-h]
+// Version: 2.5.0
+// Usage: claw-clean [-h] [--doctor]
 
 import {
   intro,
@@ -20,7 +20,7 @@ import path from "node:path";
 import os from "node:os";
 import process from "node:process";
 
-const VERSION = "2.2.0";
+const VERSION = "2.5.0";
 
 // ── Helpers ────────────────────────────────────────────────────────
 function fmt(bytes) {
@@ -80,17 +80,45 @@ function detectTrashCmd() {
   return null;
 }
 
-async function trashFile(trashCmd, filePath) {
+function auditLogPath() {
+  const base = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
+  return path.join(base, "claw-clean", "log");
+}
+
+function appendAudit(line) {
+  try {
+    const p = auditLogPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const timestamp = new Date().toISOString();
+    fs.appendFileSync(p, `[${timestamp}] ${line}\n`);
+  } catch (err) {
+    log.warn(`Could not write audit log: ${err.message}`);
+  }
+}
+
+async function trashFile(trashCmd, filePath, attempt = 1) {
   if (!fs.existsSync(filePath)) {
     log.warn(`${filePath} does not exist, skipping`);
     return false;
   }
-  return new Promise((resolve) => {
+
+  const result = await new Promise((resolve) => {
     const [cmd, ...args] = [...trashCmd, filePath];
     const child = spawn(cmd, args, { stdio: "ignore" });
     child.on("error", () => resolve(false));
     child.on("exit", (code) => resolve(code === 0));
   });
+
+  if (result) return true;
+
+  if (attempt === 1) {
+    log.step(`Retrying trash for ${filePath}...`);
+    await new Promise((r) => setTimeout(r, 300));
+    return trashFile(trashCmd, filePath, attempt + 1);
+  }
+
+  log.error(`Failed to trash ${filePath}`);
+  return false;
 }
 
 // ── Argument parsing ──────────────────────────────────────────────
@@ -100,20 +128,91 @@ function parseArgs() {
     if (arg === "-h" || arg === "--help") {
       console.log(`Session Cleanup Tool
 
-Usage: claw-clean [-h]
+Usage: claw-clean [-h] [--doctor]
 
 Flags:
   -h, --help         Show this help
+      --doctor       Check environment and dependencies
 `);
       process.exit(0);
     } else if (arg === "-v" || arg === "--version") {
       console.log(VERSION);
+      process.exit(0);
+    } else if (arg === "--doctor") {
+      runDoctor();
       process.exit(0);
     } else {
       console.error(`Error: Unknown flag: ${arg}. Use -h for help.`);
       process.exit(1);
     }
   }
+}
+
+// ── Doctor ────────────────────────────────────────────────────────
+function runDoctor() {
+  console.log(`claw-clean ${VERSION}\n`);
+
+  const checks = [];
+
+  // Node version
+  const nodeVersion = process.version;
+  const major = parseInt(nodeVersion.slice(1), 10);
+  checks.push({
+    name: "Node.js",
+    ok: major >= 18,
+    detail: nodeVersion,
+  });
+
+  // Trash command
+  const trashCmd = detectTrashCmd();
+  checks.push({
+    name: "Trash command",
+    ok: trashCmd !== null,
+    detail: trashCmd ? trashCmd.join(" ") : "none found (install trash-cli)",
+  });
+
+  // State directory writable
+  const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
+  let stateWritable = false;
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.accessSync(stateDir, fs.constants.W_OK);
+    stateWritable = true;
+  } catch {
+    stateWritable = false;
+  }
+  checks.push({
+    name: "State directory writable",
+    ok: stateWritable,
+    detail: stateDir,
+  });
+
+  // Audit log directory writable
+  const auditDir = path.dirname(auditLogPath());
+  let auditWritable = false;
+  try {
+    fs.mkdirSync(auditDir, { recursive: true });
+    fs.accessSync(auditDir, fs.constants.W_OK);
+    auditWritable = true;
+  } catch {
+    auditWritable = false;
+  }
+  checks.push({
+    name: "Audit log directory writable",
+    ok: auditWritable,
+    detail: auditDir,
+  });
+
+  let allOk = true;
+  for (const c of checks) {
+    const symbol = c.ok ? "✓" : "✗";
+    console.log(`${symbol} ${c.name}: ${c.detail}`);
+    if (!c.ok) allOk = false;
+  }
+
+  console.log("");
+  console.log(allOk ? "All checks passed." : "Some checks failed.");
+  process.exit(allOk ? 0 : 1);
 }
 
 // ── Agent selection ───────────────────────────────────────────────
@@ -454,11 +553,12 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
   // Delete entire agent
   if (deleteAgent) {
     log.step(`Trashing entire agent: ${AGENT_ID} (${fmt(agentSize)})`);
+    appendAudit(`DELETE_AGENT ${AGENT_ID} ${agentDir}`);
     if (await trashFile(trashCmd, agentDir)) {
       totalTrashed++;
       totalSize += agentSize;
     }
-    outro(`Done. Trashed ${totalTrashed} items (${fmt(totalSize)} total).`);
+    outro(`Done. Freed ${fmt(totalSize)}.`);
     return;
   }
 
@@ -467,6 +567,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
     if (!selectedIds.includes(s.id)) continue;
 
     log.step(`Trashing session ${s.id} (${fmt(s.size)})`);
+    appendAudit(`DELETE_SESSION ${s.id} ${s.file}`);
     if (await trashFile(trashCmd, s.file)) {
       totalTrashed++;
       totalSize += s.size;
@@ -475,6 +576,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
     const tjf = path.join(sessionDir, `${s.id}.trajectory.jsonl`);
     if (fs.existsSync(tjf)) {
       const tsz = fs.statSync(tjf).size;
+      appendAudit(`DELETE_COMPANION ${s.id} ${tjf}`);
       if (await trashFile(trashCmd, tjf)) {
         totalSize += tsz;
       }
@@ -483,6 +585,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
     const tpjf = path.join(sessionDir, `${s.id}.trajectory-path.json`);
     if (fs.existsSync(tpjf)) {
       const psz = fs.statSync(tpjf).size;
+      appendAudit(`DELETE_COMPANION ${s.id} ${tpjf}`);
       if (await trashFile(trashCmd, tpjf)) {
         totalSize += psz;
       }
@@ -507,6 +610,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
     if (!selectedOrphanIds.includes(o.id)) continue;
 
     log.step(`Removing orphaned session ${o.id} from sessions.json`);
+    appendAudit(`DELETE_ORPHAN ${o.id}`);
     if (sessionsJson) {
       const p = path.join(sessionDir, "sessions.json");
       const updated = Object.fromEntries(
@@ -524,6 +628,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
 
     if (item.type === "archive") {
       log.step(`Trashing archive folder (${fmt(item.size)})`);
+      appendAudit(`DELETE_ARCHIVE ${item.file}`);
       if (await trashFile(trashCmd, item.file)) {
         totalTrashed++;
         totalSize += item.size;
@@ -532,6 +637,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
     }
 
     log.step(`Trashing stale file ${path.basename(item.file)} (${fmt(item.size)})`);
+    appendAudit(`DELETE_STALE ${item.file}`);
     if (await trashFile(trashCmd, item.file)) {
       totalTrashed++;
       totalSize += item.size;
@@ -539,6 +645,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
 
     for (const companion of item.companions) {
       const csz = fs.statSync(companion).size;
+      appendAudit(`DELETE_STALE_COMPANION ${companion}`);
       if (await trashFile(trashCmd, companion)) {
         totalSize += csz;
       }
@@ -559,7 +666,8 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
     fs.writeFileSync(p, JSON.stringify(updated, null, 2));
   }
 
-  outro(`Done. Trashed ${totalTrashed} items (${fmt(totalSize)} total).`);
+  appendAudit(`SUMMARY agent=${AGENT_ID} trashed=${totalTrashed} freed=${totalSize}`);
+  outro(`Done. Freed ${fmt(totalSize)} (${totalTrashed} items).`);
 }
 
 async function main() {

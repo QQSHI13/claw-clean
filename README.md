@@ -29,6 +29,7 @@ npx claw-clean
 
 ```bash
 claw-clean                # interactive menu (choose agent first)
+claw-clean --doctor       # check environment and dependencies
 claw-clean -h             # help
 ```
 
@@ -42,6 +43,17 @@ claw-clean -h             # help
 | `Ctrl+C` | Cancel and quit |
 
 After cleaning an agent, the tool loops back to the agent menu. Choose **Done** to exit.
+
+### Audit log
+
+Every deletion is appended to the audit log with an ISO timestamp:
+
+- Default: `$XDG_STATE_HOME/claw-clean/log` (falls back to `~/.local/state/claw-clean/log`)
+
+### Safety
+
+- Failed trash operations are retried once before reporting an error.
+- Run `claw-clean --doctor` to verify Node.js, trash command, and directory permissions.
 
 ### What It Cleans
 

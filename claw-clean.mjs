@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Session Cleanup Tool — @clack/prompts TUI
-// Version: 2.0.0
+// Version: 2.1.0
 // Usage: claw-clean [-a agent] [-h]
 
 import {
   intro,
   outro,
-  multiselect,
+  groupMultiselect,
   confirm,
   isCancel,
   cancel,
@@ -19,7 +19,7 @@ import path from "node:path";
 import os from "node:os";
 import process from "node:process";
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 let AGENT_ID = "main";
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -180,14 +180,7 @@ function gatherData(sessionDir, archiveDir, sessionsJson) {
       const ag = ageDays(f);
       const key = sessKey(id, sessionsJson);
 
-      sessions.push({
-        id,
-        key,
-        file: f,
-        size: sz,
-        age: ag,
-        status: st,
-      });
+      sessions.push({ id, key, file: f, size: sz, age: ag, status: st });
       seenIds.add(id);
       sSize += sz;
       if (st === "OPEN") openC++;
@@ -207,57 +200,83 @@ function gatherData(sessionDir, archiveDir, sessionsJson) {
     }
   }
 
-  // Stale data
-  let staleCount = 0;
+  // Stale data items (each displayed as its own selectable row)
+  const staleItems = [];
   let staleSize = 0;
-  const staleFiles = [];
 
   if (fs.existsSync(sessionDir)) {
     for (const entry of fs.readdirSync(sessionDir)) {
       const f = path.join(sessionDir, entry);
       if (!fs.statSync(f).isFile()) continue;
+
       if (entry.includes(".deleted.")) {
         const sz = fs.statSync(f).size;
-        staleSize += sz;
-        staleCount++;
-        staleFiles.push(f);
-
         const baseid = entry.split(".jsonl.deleted.")[0];
+        const companions = [];
+
         const tjf = path.join(sessionDir, `${baseid}.trajectory.jsonl`);
-        if (fs.existsSync(tjf)) {
-          staleSize += fs.statSync(tjf).size;
-          staleFiles.push(tjf);
-        }
+        if (fs.existsSync(tjf)) companions.push(tjf);
+
         const tpjf = path.join(sessionDir, `${baseid}.trajectory-path.json`);
-        if (fs.existsSync(tpjf)) {
-          staleSize += fs.statSync(tpjf).size;
-          staleFiles.push(tpjf);
-        }
+        if (fs.existsSync(tpjf)) companions.push(tpjf);
+
+        const companionsSize = companions.reduce((sum, c) => sum + fs.statSync(c).size, 0);
+        staleItems.push({
+          type: "deleted",
+          value: `stale:${f}`,
+          file: f,
+          baseid,
+          label: `${entry} — ${fmt(sz)}${companions.length ? ` + ${fmt(companionsSize)} companions` : ""}`,
+          hint: `${ageDays(f)}d old`,
+          size: sz,
+          companions,
+        });
+        staleSize += sz + companionsSize;
       }
+
       if (entry.includes(".bak")) {
-        staleSize += fs.statSync(f).size;
-        staleCount++;
-        staleFiles.push(f);
+        const sz = fs.statSync(f).size;
+        staleItems.push({
+          type: "bak",
+          value: `stale:${f}`,
+          file: f,
+          label: `${entry} — ${fmt(sz)}`,
+          hint: `${ageDays(f)}d old`,
+          size: sz,
+          companions: [],
+        });
+        staleSize += sz;
       }
     }
   }
 
   if (fs.existsSync(archiveDir)) {
-    for (const entry of fs.readdirSync(archiveDir)) {
-      const f = path.join(archiveDir, entry);
-      if (!fs.statSync(f).isFile()) continue;
-      staleSize += fs.statSync(f).size;
-      staleCount++;
-      staleFiles.push(f);
+    const archiveEntries = fs.readdirSync(archiveDir).filter((e) =>
+      fs.statSync(path.join(archiveDir, e)).isFile()
+    );
+    if (archiveEntries.length > 0) {
+      const archiveSize = archiveEntries.reduce(
+        (sum, e) => sum + fs.statSync(path.join(archiveDir, e)).size,
+        0
+      );
+      staleItems.push({
+        type: "archive",
+        value: `stale:archive`,
+        file: archiveDir,
+        label: `archive/ — ${archiveEntries.length} items, ${fmt(archiveSize)}`,
+        hint: "folder",
+        size: archiveSize,
+        companions: [],
+      });
+      staleSize += archiveSize;
     }
   }
 
   return {
     sessions,
     orphans,
-    staleCount,
+    staleItems,
     staleSize,
-    staleFiles,
     sSize,
     openC,
     activeC,
@@ -286,7 +305,7 @@ async function main() {
   }
 
   const sessionsJson = loadSessionsJson(sessionDir);
-  const { sessions, orphans, staleCount, staleSize, staleFiles, sSize, openC, activeC } =
+  const { sessions, orphans, staleItems, staleSize, sSize, openC, activeC } =
     gatherData(sessionDir, archiveDir, sessionsJson);
 
   intro(`Session Cleanup — Agent: ${AGENT_ID}`);
@@ -296,36 +315,44 @@ async function main() {
       (orphans.length > 0
         ? `\nOrphaned: ${orphans.length} (in sessions.json but no file)`
         : "") +
-      (staleCount > 0
-        ? `\nStale data: ${staleCount} items — ${fmt(staleSize)}`
+      (staleItems.length > 0
+        ? `\nStale data: ${staleItems.length} items — ${fmt(staleSize)}`
         : ""),
     "Summary"
   );
 
-  const sessionOptions = sessions.map((s) => {
-    const label = `${s.id}${s.key ? ` (${s.key})` : ""} — ${fmt(s.size)} (${s.age}d, ${s.status})`;
-    const hint = s.status === "OPEN" ? "open" : s.status;
-    return {
+  const groups = {};
+
+  if (sessions.length > 0) {
+    groups["Sessions"] = sessions.map((s) => ({
       value: s.id,
-      label,
-      hint,
-    };
-  });
+      label: `${s.id}${s.key ? ` (${s.key})` : ""} — ${fmt(s.size)} (${s.age}d, ${s.status})`,
+    }));
+  }
 
-  const orphanOptions = orphans.map((o) => ({
-    value: `orphan:${o.id}`,
-    label: `${o.id}${o.key ? ` (${o.key})` : ""} — orphaned`,
-    hint: "in sessions.json only",
-  }));
+  if (orphans.length > 0) {
+    groups["Orphaned sessions"] = orphans.map((o) => ({
+      value: `orphan:${o.id}`,
+      label: `${o.id}${o.key ? ` (${o.key})` : ""}`,
+      hint: "in sessions.json only",
+    }));
+  }
 
-  const allOptions = [...sessionOptions, ...orphanOptions];
+  if (staleItems.length > 0) {
+    groups["Stale data"] = staleItems.map((item) => ({
+      value: item.value,
+      label: item.label,
+      hint: item.hint,
+    }));
+  }
 
   let selected = [];
-  if (allOptions.length > 0) {
-    selected = await multiselect({
+  if (Object.keys(groups).length > 0) {
+    selected = await groupMultiselect({
       message: "Select sessions / cleanup actions:",
-      options: allOptions,
+      options: groups,
       required: false,
+      selectableGroups: false,
     });
 
     if (isCancel(selected)) {
@@ -334,33 +361,20 @@ async function main() {
     }
   }
 
-  let cleanStale = false;
-  if (staleCount > 0) {
-    cleanStale = await confirm({
-      message: `Clean stale data? (${fmt(staleSize)})`,
-      initialValue: false,
-    });
-    if (isCancel(cleanStale)) {
-      cancel("Cancelled.");
-      process.exit(0);
-    }
-  }
-
-  const selectedIds = selected.filter((v) => !v.startsWith("orphan:"));
+  const selectedIds = selected.filter((v) => !v.startsWith("orphan:") && !v.startsWith("stale:"));
   const selectedOrphanIds = selected
     .filter((v) => v.startsWith("orphan:"))
     .map((v) => v.slice("orphan:".length));
+  const selectedStaleValues = new Set(selected.filter((v) => v.startsWith("stale:")));
 
-  const totalCount = selectedIds.length + selectedOrphanIds.length + (cleanStale ? 1 : 0);
+  const totalCount = selectedIds.length + selectedOrphanIds.length + selectedStaleValues.size;
 
   if (totalCount === 0) {
     outro("Nothing selected.");
     process.exit(0);
   }
 
-  const hasOpen = sessions.some(
-    (s) => selectedIds.includes(s.id) && s.status === "OPEN"
-  );
+  const hasOpen = sessions.some((s) => selectedIds.includes(s.id) && s.status === "OPEN");
 
   const confirmed = await confirm({
     message:
@@ -433,37 +447,46 @@ async function main() {
     }
   }
 
-  // Clean stale data
-  if (cleanStale && staleCount > 0) {
-    log.step(`Cleaning stale data — ${staleCount} items, ${fmt(staleSize)}`);
+  // Clean selected stale items
+  const cleanedDeletedBaseIds = new Set();
+  for (const item of staleItems) {
+    if (!selectedStaleValues.has(item.value)) continue;
 
-    for (const f of staleFiles) {
-      if (await trashFile(trashCmd, f)) {
+    if (item.type === "archive") {
+      log.step(`Trashing archive folder (${fmt(item.size)})`);
+      if (await trashFile(trashCmd, item.file)) {
         totalTrashed++;
+        totalSize += item.size;
+      }
+      continue;
+    }
+
+    log.step(`Trashing stale file ${path.basename(item.file)} (${fmt(item.size)})`);
+    if (await trashFile(trashCmd, item.file)) {
+      totalTrashed++;
+      totalSize += item.size;
+    }
+
+    for (const companion of item.companions) {
+      const csz = fs.statSync(companion).size;
+      if (await trashFile(trashCmd, companion)) {
+        totalSize += csz;
       }
     }
 
-    if (fs.existsSync(archiveDir)) {
-      await trashFile(trashCmd, archiveDir);
+    if (item.type === "deleted") {
+      cleanedDeletedBaseIds.add(item.baseid);
     }
+  }
 
-    if (sessionsJson) {
-      const deletedIds = new Set();
-      for (const entry of fs.readdirSync(sessionDir)) {
-        if (entry.includes(".deleted.")) {
-          deletedIds.add(entry.split(".jsonl.deleted.")[0]);
-        }
-      }
-      if (deletedIds.size > 0) {
-        const p = path.join(sessionDir, "sessions.json");
-        const updated = Object.fromEntries(
-          Object.entries(sessionsJson).filter(
-            ([, v]) => !v || !deletedIds.has(v.sessionId)
-          )
-        );
-        fs.writeFileSync(p, JSON.stringify(updated, null, 2));
-      }
-    }
+  if (cleanedDeletedBaseIds.size > 0 && sessionsJson) {
+    const p = path.join(sessionDir, "sessions.json");
+    const updated = Object.fromEntries(
+      Object.entries(sessionsJson).filter(
+        ([, v]) => !v || !cleanedDeletedBaseIds.has(v.sessionId)
+      )
+    );
+    fs.writeFileSync(p, JSON.stringify(updated, null, 2));
   }
 
   outro(`Done. Trashed ${totalTrashed} items (${fmt(totalSize)} total).`);

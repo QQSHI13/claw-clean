@@ -36,10 +36,12 @@ claw-clean -h             # help
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Navigate sessions |
+| `↑` / `↓` | Navigate options |
 | `Space` | Toggle selection |
-| `Enter` | Submit selections |
+| `Enter` | Submit selection |
 | `Ctrl+C` | Cancel and quit |
+
+After cleaning an agent, the tool loops back to the agent menu. Choose **Done** to exit.
 
 ### What It Cleans
 

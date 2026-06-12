@@ -134,13 +134,12 @@ async function selectAgent(stateDir) {
     process.exit(1);
   }
 
-  if (agents.length === 1) {
-    return agents[0];
-  }
+  const options = agents.map((a) => ({ value: a, label: a }));
+  options.push({ value: "__done__", label: "Done" });
 
   const choice = await select({
     message: "Select agent:",
-    options: agents.map((a) => ({ value: a, label: a })),
+    options,
   });
 
   if (isCancel(choice)) {
@@ -327,19 +326,7 @@ function gatherData(sessionDir, archiveDir, sessionsJson) {
 }
 
 // ── Main ──────────────────────────────────────────────────────────
-async function main() {
-  parseArgs();
-
-  const trashCmd = detectTrashCmd();
-  if (!trashCmd) {
-    console.error(
-      "Error: No trash command found. Install trash-cli: npm install -g trash-cli"
-    );
-    process.exit(1);
-  }
-
-  const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
-  const AGENT_ID = await selectAgent(stateDir);
+async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
   const sessionDir = path.join(stateDir, "agents", AGENT_ID, "sessions");
   const archiveDir = path.join(sessionDir, "archive");
 
@@ -442,7 +429,7 @@ async function main() {
 
   if (totalCount === 0) {
     outro("Nothing selected.");
-    process.exit(0);
+    return;
   }
 
   const hasOpen = sessions.some((s) => selectedIds.includes(s.id) && s.status === "OPEN");
@@ -458,7 +445,7 @@ async function main() {
 
   if (isCancel(confirmed) || !confirmed) {
     cancel("Cancelled.");
-    process.exit(0);
+    return;
   }
 
   let totalTrashed = 0;
@@ -472,7 +459,7 @@ async function main() {
       totalSize += agentSize;
     }
     outro(`Done. Trashed ${totalTrashed} items (${fmt(totalSize)} total).`);
-    process.exit(0);
+    return;
   }
 
   // Trash sessions
@@ -573,6 +560,33 @@ async function main() {
   }
 
   outro(`Done. Trashed ${totalTrashed} items (${fmt(totalSize)} total).`);
+}
+
+async function main() {
+  parseArgs();
+
+  const trashCmd = detectTrashCmd();
+  if (!trashCmd) {
+    console.error(
+      "Error: No trash command found. Install trash-cli: npm install -g trash-cli"
+    );
+    process.exit(1);
+  }
+
+  const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
+
+  intro("Session Cleanup");
+
+  while (true) {
+    const AGENT_ID = await selectAgent(stateDir);
+
+    if (AGENT_ID === "__done__") {
+      outro("Goodbye.");
+      break;
+    }
+
+    await cleanupAgent(stateDir, AGENT_ID, trashCmd);
+  }
 }
 
 main().catch((err) => {

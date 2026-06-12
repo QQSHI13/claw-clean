@@ -28,8 +28,7 @@ npx claw-clean
 ## Usage
 
 ```bash
-claw-clean                # interactive menu
-claw-clean -a dashboard   # target another agent
+claw-clean                # interactive menu (choose agent first)
 claw-clean -h             # help
 ```
 

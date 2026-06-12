@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Session Cleanup Tool — @clack/prompts TUI
-// Version: 2.1.0
-// Usage: claw-clean [-a agent] [-h]
+// Version: 2.2.0
+// Usage: claw-clean [-h]
 
 import {
   intro,
   outro,
+  select,
   groupMultiselect,
   confirm,
   isCancel,
@@ -19,8 +20,7 @@ import path from "node:path";
 import os from "node:os";
 import process from "node:process";
 
-const VERSION = "2.1.0";
-let AGENT_ID = "main";
+const VERSION = "2.2.0";
 
 // ── Helpers ────────────────────────────────────────────────────────
 function fmt(bytes) {
@@ -79,22 +79,13 @@ async function trashFile(trashCmd, filePath) {
 // ── Argument parsing ──────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2);
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "-a" || arg === "--agent") {
-      const val = args[++i];
-      if (!val) {
-        console.error("Error: --agent requires a value");
-        process.exit(1);
-      }
-      AGENT_ID = val;
-    } else if (arg === "-h" || arg === "--help") {
+  for (const arg of args) {
+    if (arg === "-h" || arg === "--help") {
       console.log(`Session Cleanup Tool
 
-Usage: claw-clean [-a agent] [-h]
+Usage: claw-clean [-h]
 
 Flags:
-  -a, --agent <id>   Target agent (default: main)
   -h, --help         Show this help
 `);
       process.exit(0);
@@ -106,6 +97,41 @@ Flags:
       process.exit(1);
     }
   }
+}
+
+// ── Agent selection ───────────────────────────────────────────────
+async function selectAgent(stateDir) {
+  const agentsDir = path.join(stateDir, "agents");
+  if (!fs.existsSync(agentsDir)) {
+    console.error(`Error: No agents directory: ${agentsDir}`);
+    process.exit(1);
+  }
+
+  const agents = fs
+    .readdirSync(agentsDir)
+    .filter((e) => fs.statSync(path.join(agentsDir, e)).isDirectory())
+    .sort();
+
+  if (agents.length === 0) {
+    console.error(`Error: No agents found in ${agentsDir}`);
+    process.exit(1);
+  }
+
+  if (agents.length === 1) {
+    return agents[0];
+  }
+
+  const choice = await select({
+    message: "Select agent:",
+    options: agents.map((a) => ({ value: a, label: a })),
+  });
+
+  if (isCancel(choice)) {
+    cancel("Cancelled.");
+    process.exit(0);
+  }
+
+  return choice;
 }
 
 // ── Session data ──────────────────────────────────────────────────
@@ -296,6 +322,7 @@ async function main() {
   }
 
   const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
+  const AGENT_ID = await selectAgent(stateDir);
   const sessionDir = path.join(stateDir, "agents", AGENT_ID, "sessions");
   const archiveDir = path.join(sessionDir, "archive");
 
@@ -326,7 +353,8 @@ async function main() {
   if (sessions.length > 0) {
     groups["Sessions"] = sessions.map((s) => ({
       value: s.id,
-      label: `${s.id}${s.key ? ` (${s.key})` : ""} — ${fmt(s.size)} (${s.age}d, ${s.status})`,
+      label: `${s.id}${s.key ? ` (${s.key})` : ""} — ${fmt(s.size)}`,
+      hint: `${s.age}d, ${s.status}`,
     }));
   }
 
@@ -352,7 +380,6 @@ async function main() {
       message: "Select sessions / cleanup actions:",
       options: groups,
       required: false,
-      selectableGroups: false,
     });
 
     if (isCancel(selected)) {
@@ -361,11 +388,24 @@ async function main() {
     }
   }
 
-  const selectedIds = selected.filter((v) => !v.startsWith("orphan:") && !v.startsWith("stale:"));
-  const selectedOrphanIds = selected
+  // Expand group-level selections to all child values
+  const expanded = new Set();
+  for (const value of selected) {
+    if (value in groups) {
+      for (const opt of groups[value]) {
+        expanded.add(opt.value);
+      }
+    } else {
+      expanded.add(value);
+    }
+  }
+
+  const selectedValues = Array.from(expanded);
+  const selectedIds = selectedValues.filter((v) => !v.startsWith("orphan:") && !v.startsWith("stale:"));
+  const selectedOrphanIds = selectedValues
     .filter((v) => v.startsWith("orphan:"))
     .map((v) => v.slice("orphan:".length));
-  const selectedStaleValues = new Set(selected.filter((v) => v.startsWith("stale:")));
+  const selectedStaleValues = new Set(selectedValues.filter((v) => v.startsWith("stale:")));
 
   const totalCount = selectedIds.length + selectedOrphanIds.length + selectedStaleValues.size;
 

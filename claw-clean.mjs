@@ -388,6 +388,20 @@ function gatherData(sessionDir, archiveDir, sessionsJson) {
         });
         staleSize += sz;
       }
+
+      if (entry.includes(".reset.")) {
+        const sz = fs.statSync(f).size;
+        staleItems.push({
+          type: "reset",
+          value: `stale:${f}`,
+          file: f,
+          label: `${entry} — ${fmt(sz)}`,
+          hint: `${ageDays(f)}d old`,
+          size: sz,
+          companions: [],
+        });
+        staleSize += sz;
+      }
     }
   }
 

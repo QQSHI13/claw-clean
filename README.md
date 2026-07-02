@@ -9,7 +9,7 @@ Interactive session cleanup tool for [OpenClaw](https://openclaw.ai).
 - **Space to toggle**, Enter to execute
 - **Auto-detected trash command** — works with `trash`, `trash-put`, or `gio trash`
 - **Cleans trajectory companions** alongside selected sessions
-- **Stale data cleanup** — `.deleted`, `.bak-*`, `archive/`
+- **Stale data cleanup** — `.deleted`, `.bak-*`, `.reset-*`, `archive/`
 - **Cleans `sessions.json`** — removes deleted and orphaned session references
 - **Color-coded status** — OPEN (red), active (green), orphaned (yellow), inactive (default)
 
@@ -69,6 +69,7 @@ Every deletion is appended to the audit log with an ISO timestamp:
 **Stale data:**
 - `.deleted.*` files + their trajectory companions
 - `.bak-*` backup files
+- `.reset.*` reset snapshot files
 - `archive/` folder
 
 **Whole agent:**

@@ -1,7 +1,7 @@
 {
   "name": "claw-clean",
-  "version": "2.5.2",
-  "description": "Interactive session cleanup tool for OpenClaw — @clack/prompts TUI",
+  "version": "2.6.0",
+  "description": "Interactive cleanup tool for OpenClaw agents, legacy sessions, and migration artifacts — @clack/prompts TUI",
   "type": "module",
   "main": "claw-clean.mjs",
   "bin": {

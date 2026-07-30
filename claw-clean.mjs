@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Session Cleanup Tool — @clack/prompts TUI
-// Version: 2.5.0
-// Usage: claw-clean [-h] [--doctor]
+// claw-clean — Interactive cleanup tool for OpenClaw agents and legacy sessions.
+// Version: 2.6.0
+// Usage: claw-clean [-h] [--doctor] [--dry-run]
 
 import {
   intro,
@@ -20,7 +20,11 @@ import path from "node:path";
 import os from "node:os";
 import process from "node:process";
 
-const VERSION = "2.5.1";
+const VERSION = "2.6.0";
+
+// ── Global options ─────────────────────────────────────────────────
+let DRY_RUN = false;
+let CLI_AGENT = null;
 
 // ── Helpers ────────────────────────────────────────────────────────
 function fmt(bytes) {
@@ -102,6 +106,11 @@ async function trashFile(trashCmd, filePath, attempt = 1) {
     return false;
   }
 
+  if (DRY_RUN) {
+    log.step(`[dry-run] Would trash ${filePath}`);
+    return true;
+  }
+
   const result = await new Promise((resolve) => {
     const [cmd, ...args] = [...trashCmd, filePath];
     const child = spawn(cmd, args, { stdio: "ignore" });
@@ -121,18 +130,65 @@ async function trashFile(trashCmd, filePath, attempt = 1) {
   return false;
 }
 
+// ── SQLite helpers (best-effort; Node >=22 has node:sqlite) ────────
+let SqliteDatabase = null;
+
+try {
+  const sqlite = await import("node:sqlite");
+  SqliteDatabase = sqlite.DatabaseSync;
+} catch {
+  SqliteDatabase = null;
+}
+
+function hasNodeSqlite() {
+  return SqliteDatabase !== null;
+}
+
+function readAgentSqliteSessions(dbPath) {
+  if (!hasNodeSqlite() || !fs.existsSync(dbPath)) {
+    return null;
+  }
+  try {
+    const db = new SqliteDatabase(dbPath, { readOnly: true });
+    try {
+      const stmt = db.prepare(`
+        SELECT
+          n.session_key,
+          n.current_session_id,
+          n.label,
+          n.status,
+          n.updated_at,
+          n.archived_at,
+          n.pinned_at
+        FROM session_nodes n
+        ORDER BY n.updated_at DESC
+      `);
+      return stmt.all();
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    // Best-effort; corrupted or locked DBs are ignored.
+    return null;
+  }
+}
+
 // ── Argument parsing ──────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2);
-  for (const arg of args) {
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
     if (arg === "-h" || arg === "--help") {
       console.log(`Session Cleanup Tool
 
-Usage: claw-clean [-h] [--doctor]
+Usage: claw-clean [-h] [--doctor] [--dry-run] [--agent <agent-id>]
 
 Flags:
-  -h, --help         Show this help
-      --doctor       Check environment and dependencies
+  -h, --help              Show this help
+      --doctor            Check environment and dependencies
+      --dry-run           Show what would be deleted without deleting anything
+      --agent <agent-id>  Skip the agent menu and clean the specified agent
 `);
       process.exit(0);
     } else if (arg === "-v" || arg === "--version") {
@@ -141,6 +197,18 @@ Flags:
     } else if (arg === "--doctor") {
       runDoctor();
       process.exit(0);
+    } else if (arg === "--dry-run") {
+      DRY_RUN = true;
+      i++;
+    } else if (arg === "--agent") {
+      i++;
+      const next = args[i];
+      if (!next) {
+        console.error("Error: --agent requires an agent id.");
+        process.exit(1);
+      }
+      CLI_AGENT = next;
+      i++;
     } else {
       console.error(`Error: Unknown flag: ${arg}. Use -h for help.`);
       process.exit(1);
@@ -161,6 +229,13 @@ function runDoctor() {
     name: "Node.js",
     ok: major >= 18,
     detail: nodeVersion,
+  });
+
+  // node:sqlite availability (optional but useful)
+  checks.push({
+    name: "node:sqlite (optional)",
+    ok: hasNodeSqlite(),
+    detail: hasNodeSqlite() ? "available" : `not available on ${nodeVersion} (Node >=22 required)`,
   });
 
   // Trash command
@@ -249,7 +324,27 @@ async function selectAgent(stateDir) {
   return choice;
 }
 
-// ── Session data ──────────────────────────────────────────────────
+// ── Agent layout detection ────────────────────────────────────────
+function detectAgentLayout(stateDir, agentId) {
+  const agentDir = path.join(stateDir, "agents", agentId);
+  const legacySessionsDir = path.join(agentDir, "sessions");
+  const agentDbDir = path.join(agentDir, "agent");
+  const agentDbPath = path.join(agentDbDir, "openclaw-agent.sqlite");
+  const importArchiveDir = path.join(agentDir, "session-sqlite-import-archive");
+
+  return {
+    agentDir,
+    legacySessionsDir,
+    hasLegacySessions: fs.existsSync(legacySessionsDir),
+    agentDbDir,
+    agentDbPath,
+    hasAgentDb: fs.existsSync(agentDbPath),
+    importArchiveDir,
+    hasImportArchive: fs.existsSync(importArchiveDir),
+  };
+}
+
+// ── Legacy sessions.json helpers ──────────────────────────────────
 function loadSessionsJson(sessionDir) {
   const p = path.join(sessionDir, "sessions.json");
   if (!fs.existsSync(p)) return null;
@@ -293,128 +388,237 @@ function sessFileExists(id, sessionDir, sessionsJson) {
   return sf && fs.existsSync(sf);
 }
 
-function gatherData(sessionDir, archiveDir, sessionsJson) {
+// ── Artifact classifiers matching OpenClaw's artifact naming ───────
+const ARCHIVE_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d{3})?Z$/;
+
+function isSessionArchiveArtifactName(fileName) {
+  if (/^sessions\.json\.bak\.\d+$/.test(fileName)) return true;
+  for (const reason of ["deleted", "reset", "bak"]) {
+    const marker = `.jsonl.${reason}.`;
+    const index = fileName.lastIndexOf(marker);
+    if (index > 0) {
+      const raw = fileName.slice(index + marker.length);
+      if (ARCHIVE_TIMESTAMP_RE.test(raw)) return true;
+    }
+  }
+  return false;
+}
+
+function isImportArchiveArtifactName(fileName) {
+  return /\.imported-\d+$/.test(fileName);
+}
+
+function isAgentDbBackupArtifactName(fileName) {
+  if (/\.bak(?:-|$)/i.test(fileName)) return true;
+  if (/\.sqlite-import\..*\.bak$/i.test(fileName)) return true;
+  if (/\.tmp$/i.test(fileName)) return true;
+  if (fileName === "openclaw-agent.sqlite.reindex-lock.sqlite") return true;
+  return false;
+}
+
+function parseArchiveBaseId(fileName) {
+  // <id>.jsonl.<reason>.<timestamp>
+  for (const reason of ["deleted", "reset", "bak"]) {
+    const marker = `.jsonl.${reason}.`;
+    const index = fileName.lastIndexOf(marker);
+    if (index > 0) {
+      return fileName.slice(0, index);
+    }
+  }
+  return null;
+}
+
+// ── Data gathering ────────────────────────────────────────────────
+function gatherLegacySessions(sessionDir, sessionsJson) {
   const sessions = [];
   const seenIds = new Set();
   let sSize = 0;
   let openC = 0;
   let activeC = 0;
 
-  if (fs.existsSync(sessionDir)) {
-    for (const entry of fs.readdirSync(sessionDir)) {
-      const f = path.join(sessionDir, entry);
-      if (!fs.statSync(f).isFile()) continue;
-      if (!entry.endsWith(".jsonl")) continue;
-      if (entry.endsWith(".trajectory.jsonl")) continue;
-      if (entry.includes(".bak")) continue;
-      if (entry.startsWith(".")) continue;
-      if (entry.includes(".checkpoint.")) continue;
-      if (entry.includes(".deleted.")) continue;
-
-      const id = entry.slice(0, -".jsonl".length);
-      const sz = fs.statSync(f).size;
-      const st = sessIsActive(id, sessionsJson)
-        ? fs.existsSync(`${f}.lock`)
-          ? "OPEN"
-          : "active"
-        : "inactive";
-      const ag = ageDays(f);
-      const key = sessKey(id, sessionsJson);
-
-      sessions.push({ id, key, file: f, size: sz, age: ag, status: st });
-      seenIds.add(id);
-      sSize += sz;
-      if (st === "OPEN") openC++;
-      if (st === "active") activeC++;
-    }
+  if (!fs.existsSync(sessionDir)) {
+    return { sessions, seenIds, sSize, openC, activeC };
   }
 
-  // Orphans: entries in sessions.json with sessionId but no file
+  for (const entry of fs.readdirSync(sessionDir)) {
+    const f = path.join(sessionDir, entry);
+    if (!fs.statSync(f).isFile()) continue;
+    if (!entry.endsWith(".jsonl")) continue;
+    if (entry.endsWith(".trajectory.jsonl")) continue;
+    if (isSessionArchiveArtifactName(entry)) continue;
+    if (entry.startsWith(".")) continue;
+    if (entry.includes(".checkpoint.")) continue;
+    if (isImportArchiveArtifactName(entry)) continue;
+
+    const id = entry.slice(0, -".jsonl".length);
+    const sz = fs.statSync(f).size;
+    const st = sessIsActive(id, sessionsJson)
+      ? fs.existsSync(`${f}.lock`)
+        ? "OPEN"
+        : "active"
+      : "inactive";
+    const ag = ageDays(f);
+    const key = sessKey(id, sessionsJson);
+
+    sessions.push({ id, key, file: f, size: sz, age: ag, status: st });
+    seenIds.add(id);
+    sSize += sz;
+    if (st === "OPEN") openC++;
+    if (st === "active") activeC++;
+  }
+
+  return { sessions, seenIds, sSize, openC, activeC };
+}
+
+function gatherOrphans(sessionDir, sessionsJson, seenIds) {
   const orphans = [];
-  if (sessionsJson) {
-    for (const [key, value] of Object.entries(sessionsJson)) {
-      if (!value || typeof value.sessionId !== "string") continue;
-      const id = value.sessionId;
-      if (seenIds.has(id)) continue;
-      if (sessFileExists(id, sessionDir, sessionsJson)) continue;
-      orphans.push({ id, key });
-    }
+  if (!sessionsJson) return orphans;
+
+  for (const [key, value] of Object.entries(sessionsJson)) {
+    if (!value || typeof value.sessionId !== "string") continue;
+    const id = value.sessionId;
+    if (seenIds.has(id)) continue;
+    if (sessFileExists(id, sessionDir, sessionsJson)) continue;
+    orphans.push({ id, key });
   }
 
-  // Stale data items (each displayed as its own selectable row)
+  return orphans;
+}
+
+function gatherStaleItems(sessionDir) {
   const staleItems = [];
   let staleSize = 0;
 
-  if (fs.existsSync(sessionDir)) {
-    for (const entry of fs.readdirSync(sessionDir)) {
-      const f = path.join(sessionDir, entry);
-      if (!fs.statSync(f).isFile()) continue;
+  if (!fs.existsSync(sessionDir)) {
+    return { staleItems, staleSize };
+  }
 
-      if (entry.includes(".deleted.")) {
-        const sz = fs.statSync(f).size;
-        const baseid = entry.split(".jsonl.deleted.")[0];
-        const companions = [];
+  for (const entry of fs.readdirSync(sessionDir)) {
+    const f = path.join(sessionDir, entry);
+    if (!fs.statSync(f).isFile()) continue;
 
+    if (isSessionArchiveArtifactName(entry)) {
+      const sz = fs.statSync(f).size;
+      const baseid = parseArchiveBaseId(entry);
+      const companions = [];
+
+      if (baseid) {
         const tjf = path.join(sessionDir, `${baseid}.trajectory.jsonl`);
         if (fs.existsSync(tjf)) companions.push(tjf);
 
         const tpjf = path.join(sessionDir, `${baseid}.trajectory-path.json`);
         if (fs.existsSync(tpjf)) companions.push(tpjf);
-
-        const companionsSize = companions.reduce((sum, c) => sum + fs.statSync(c).size, 0);
-        staleItems.push({
-          type: "deleted",
-          value: `stale:${f}`,
-          file: f,
-          baseid,
-          label: `${entry} — ${fmt(sz)}${companions.length ? ` + ${fmt(companionsSize)} companions` : ""}`,
-          hint: `${ageDays(f)}d old`,
-          size: sz,
-          companions,
-        });
-        staleSize += sz + companionsSize;
       }
 
-      if (entry.includes(".bak")) {
-        const sz = fs.statSync(f).size;
-        staleItems.push({
-          type: "bak",
-          value: `stale:${f}`,
-          file: f,
-          label: `${entry} — ${fmt(sz)}`,
-          hint: `${ageDays(f)}d old`,
-          size: sz,
-          companions: [],
-        });
-        staleSize += sz;
-      }
+      const companionsSize = companions.reduce((sum, c) => sum + fs.statSync(c).size, 0);
+      const reason = entry.includes(".deleted.")
+        ? "deleted"
+        : entry.includes(".reset.")
+          ? "reset"
+          : "bak";
 
-      if (entry.includes(".reset.")) {
-        const sz = fs.statSync(f).size;
-        staleItems.push({
-          type: "reset",
-          value: `stale:${f}`,
-          file: f,
-          label: `${entry} — ${fmt(sz)}`,
-          hint: `${ageDays(f)}d old`,
-          size: sz,
-          companions: [],
-        });
-        staleSize += sz;
-      }
+      staleItems.push({
+        type: reason,
+        value: `stale:${f}`,
+        file: f,
+        baseid,
+        label: `${entry} — ${fmt(sz)}${companions.length ? ` + ${fmt(companionsSize)} companions` : ""}`,
+        hint: `${ageDays(f)}d old`,
+        size: sz,
+        companions,
+      });
+      staleSize += sz + companionsSize;
+    }
+
+    if (isImportArchiveArtifactName(entry)) {
+      const sz = fs.statSync(f).size;
+      staleItems.push({
+        type: "import",
+        value: `stale:${f}`,
+        file: f,
+        label: `${entry} — ${fmt(sz)}`,
+        hint: `${ageDays(f)}d old`,
+        size: sz,
+        companions: [],
+      });
+      staleSize += sz;
     }
   }
 
+  return { staleItems, staleSize };
+}
+
+function gatherLegacyImportArchive(importArchiveDir) {
+  if (!fs.existsSync(importArchiveDir)) {
+    return null;
+  }
+
+  const files = fs
+    .readdirSync(importArchiveDir)
+    .map((e) => {
+      const f = path.join(importArchiveDir, e);
+      try {
+        return { name: e, file: f, size: fs.statSync(f).size };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  if (files.length === 0) {
+    return null;
+  }
+
+  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+  return {
+    dir: importArchiveDir,
+    fileCount: files.length,
+    size: totalSize,
+    files,
+  };
+}
+
+function gatherAgentDbBackups(agentDbDir) {
+  if (!fs.existsSync(agentDbDir)) {
+    return [];
+  }
+
+  const backups = [];
+  for (const entry of fs.readdirSync(agentDbDir)) {
+    const f = path.join(agentDbDir, entry);
+    if (!fs.statSync(f).isFile()) continue;
+    if (isAgentDbBackupArtifactName(entry)) {
+      backups.push({ file: f, name: entry, size: fs.statSync(f).size });
+    }
+  }
+
+  return backups.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function gatherData(sessionDir, archiveDir, importArchiveDir, agentDbDir, sessionsJson) {
+  const { sessions, seenIds, sSize, openC, activeC } = gatherLegacySessions(
+    sessionDir,
+    sessionsJson
+  );
+  const orphans = gatherOrphans(sessionDir, sessionsJson, seenIds);
+  const { staleItems, staleSize } = gatherStaleItems(sessionDir);
+
+  // Legacy archive/ folder
+  let archiveItem = null;
   if (fs.existsSync(archiveDir)) {
-    const archiveEntries = fs.readdirSync(archiveDir).filter((e) =>
-      fs.statSync(path.join(archiveDir, e)).isFile()
-    );
+    const archiveEntries = fs.readdirSync(archiveDir).filter((e) => {
+      try {
+        return fs.statSync(path.join(archiveDir, e)).isFile();
+      } catch {
+        return false;
+      }
+    });
     if (archiveEntries.length > 0) {
       const archiveSize = archiveEntries.reduce(
         (sum, e) => sum + fs.statSync(path.join(archiveDir, e)).size,
         0
       );
-      staleItems.push({
+      archiveItem = {
         type: "archive",
         value: `stale:archive`,
         file: archiveDir,
@@ -422,16 +626,20 @@ function gatherData(sessionDir, archiveDir, sessionsJson) {
         hint: "folder",
         size: archiveSize,
         companions: [],
-      });
-      staleSize += archiveSize;
+      };
     }
   }
+
+  const importArchive = gatherLegacyImportArchive(importArchiveDir);
+  const dbBackups = gatherAgentDbBackups(agentDbDir);
 
   return {
     sessions,
     orphans,
-    staleItems,
-    staleSize,
+    staleItems: archiveItem ? [...staleItems, archiveItem] : staleItems,
+    staleSize: archiveItem ? staleSize + archiveItem.size : staleSize,
+    importArchive,
+    dbBackups,
     sSize,
     openC,
     activeC,
@@ -440,35 +648,77 @@ function gatherData(sessionDir, archiveDir, sessionsJson) {
 
 // ── Main ──────────────────────────────────────────────────────────
 async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
-  const sessionDir = path.join(stateDir, "agents", AGENT_ID, "sessions");
+  const layout = detectAgentLayout(stateDir, AGENT_ID);
+  const sessionDir = layout.legacySessionsDir;
   const archiveDir = path.join(sessionDir, "archive");
 
-  if (!fs.existsSync(sessionDir)) {
-    console.error(`Error: No session directory: ${sessionDir}`);
-    process.exit(1);
+  let sessionsJson = null;
+  if (layout.hasLegacySessions) {
+    sessionsJson = loadSessionsJson(sessionDir);
   }
 
-  let sessionsJson = loadSessionsJson(sessionDir);
-  const { sessions, orphans, staleItems, staleSize, sSize, openC, activeC } =
-    gatherData(sessionDir, archiveDir, sessionsJson);
+  const sqliteSessions = layout.hasAgentDb ? readAgentSqliteSessions(layout.agentDbPath) : null;
+
+  const { sessions, orphans, staleItems, staleSize, importArchive, dbBackups, sSize, openC, activeC } =
+    gatherData(sessionDir, archiveDir, layout.importArchiveDir, layout.agentDbDir, sessionsJson);
 
   intro(`Session Cleanup — Agent: ${AGENT_ID}`);
 
-  note(
-    `Sessions: ${sessions.length} (${activeC} active, ${openC} open) — ${fmt(sSize)}` +
-      (orphans.length > 0
-        ? `\nOrphaned: ${orphans.length} (in sessions.json but no file)`
-        : "") +
-      (staleItems.length > 0
-        ? `\nStale data: ${staleItems.length} items — ${fmt(staleSize)}`
-        : ""),
-    "Summary"
-  );
+  const dbSize = layout.hasAgentDb ? fs.statSync(layout.agentDbPath).size : 0;
+  const dbBackupSize = dbBackups.reduce((sum, b) => sum + b.size, 0);
+
+  const summaryLines = [];
+  if (layout.hasAgentDb) {
+    summaryLines.push(`Agent DB: ${fmt(dbSize)} (${sqliteSessions?.length ?? "?"} sessions)`);
+  }
+  if (sessions.length > 0) {
+    summaryLines.push(`Legacy sessions: ${sessions.length} (${activeC} active, ${openC} open) — ${fmt(sSize)}`);
+  }
+  if (orphans.length > 0) {
+    summaryLines.push(`Orphaned: ${orphans.length} (in sessions.json but no file)`);
+  }
+  if (staleItems.length > 0) {
+    summaryLines.push(`Stale data: ${staleItems.length} items — ${fmt(staleSize)}`);
+  }
+  if (importArchive) {
+    summaryLines.push(`Import archive: ${importArchive.fileCount} items — ${fmt(importArchive.size)}`);
+  }
+  if (dbBackups.length > 0) {
+    summaryLines.push(`DB backups/temp: ${dbBackups.length} items — ${fmt(dbBackupSize)}`);
+  }
+
+  if (summaryLines.length === 0) {
+    summaryLines.push("Nothing to clean up.");
+  }
+
+  note(summaryLines.join("\n"), DRY_RUN ? "Summary (dry-run)" : "Summary");
+
+  if (layout.hasAgentDb) {
+    if (sqliteSessions && sqliteSessions.length > 0) {
+      const sqliteLines = sqliteSessions.map((s) => {
+        const label = s.label || s.display_name || "(unlabeled)";
+        const status = s.status || "unknown";
+        const archived = s.archived_at ? " archived" : "";
+        const pinned = s.pinned_at ? " pinned" : "";
+        const age = s.updated_at ? `${Math.floor((Date.now() - s.updated_at) / 86400000)}d` : "?";
+        return `${s.session_key} — ${label} [${status}${archived}${pinned}, ${age}]`;
+      });
+      note(
+        `${sqliteLines.join("\n")}\n\nSQLite sessions cannot be deleted here. Use 'openclaw sessions cleanup' to prune them safely.`,
+        `SQLite sessions (${sqliteSessions.length})`
+      );
+    } else {
+      note(
+        "This agent uses the SQLite session store. Use 'openclaw sessions cleanup' to prune individual SQLite sessions safely.",
+        "Tip"
+      );
+    }
+  }
 
   const groups = {};
 
   if (sessions.length > 0) {
-    groups["Sessions"] = sessions.map((s) => ({
+    groups["Legacy sessions"] = sessions.map((s) => ({
       value: s.id,
       label: `${s.id}${s.key ? ` (${s.key})` : ""} — ${fmt(s.size)}`,
       hint: `${s.age}d, ${s.status}`,
@@ -488,6 +738,24 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
       value: item.value,
       label: item.label,
       hint: item.hint,
+    }));
+  }
+
+  if (importArchive) {
+    groups["Legacy import archive"] = [
+      {
+        value: `import-archive:${importArchive.dir}`,
+        label: `session-sqlite-import-archive/ — ${importArchive.fileCount} items, ${fmt(importArchive.size)}`,
+        hint: "legacy import artifacts",
+      },
+    ];
+  }
+
+  if (dbBackups.length > 0) {
+    groups["DB backups & temp"] = dbBackups.map((b) => ({
+      value: `dbbackup:${b.file}`,
+      label: `${b.name} — ${fmt(b.size)}`,
+      hint: `${ageDays(b.file)}d old`,
     }));
   }
 
@@ -529,16 +797,32 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
 
   const selectedValues = Array.from(expanded);
   const selectedIds = selectedValues.filter(
-    (v) => !v.startsWith("orphan:") && !v.startsWith("stale:") && !v.startsWith("agent:")
+    (v) =>
+      !v.startsWith("orphan:") &&
+      !v.startsWith("stale:") &&
+      !v.startsWith("agent:") &&
+      !v.startsWith("import-archive:") &&
+      !v.startsWith("dbbackup:")
   );
   const selectedOrphanIds = selectedValues
     .filter((v) => v.startsWith("orphan:"))
     .map((v) => v.slice("orphan:".length));
   const selectedStaleValues = new Set(selectedValues.filter((v) => v.startsWith("stale:")));
+  const selectedImportArchive = selectedValues
+    .filter((v) => v.startsWith("import-archive:"))
+    .map((v) => v.slice("import-archive:".length));
+  const selectedDbBackups = selectedValues
+    .filter((v) => v.startsWith("dbbackup:"))
+    .map((v) => v.slice("dbbackup:".length));
   const deleteAgent = selectedValues.includes("agent:delete");
 
   const totalCount =
-    selectedIds.length + selectedOrphanIds.length + selectedStaleValues.size + (deleteAgent ? 1 : 0);
+    selectedIds.length +
+    selectedOrphanIds.length +
+    selectedStaleValues.size +
+    selectedImportArchive.length +
+    selectedDbBackups.length +
+    (deleteAgent ? 1 : 0);
 
   if (totalCount === 0) {
     outro("Nothing selected.");
@@ -552,6 +836,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
       `${totalCount} item(s) selected for cleanup.` +
       (deleteAgent ? " (WARNING: entire agent will be deleted)" : "") +
       (hasOpen ? " (WARNING: open sessions selected)" : "") +
+      (DRY_RUN ? " (dry-run — no files will be changed)" : "") +
       " Proceed?",
     initialValue: false,
   });
@@ -566,7 +851,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
 
   // Delete entire agent
   if (deleteAgent) {
-    log.step(`Trashing entire agent: ${AGENT_ID} (${fmt(agentSize)})`);
+    log.step(`${DRY_RUN ? "[dry-run] Would trash" : "Trashing"} entire agent: ${AGENT_ID} (${fmt(agentSize)})`);
     appendAudit(`DELETE_AGENT ${AGENT_ID} ${agentDir}`);
     if (await trashFile(trashCmd, agentDir)) {
       totalTrashed++;
@@ -576,7 +861,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
     return;
   }
 
-  // Trash sessions
+  // Trash legacy sessions
   for (const s of sessions) {
     if (!selectedIds.includes(s.id)) continue;
 
@@ -615,7 +900,9 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
               !(typeof v.sessionFile === "string" && v.sessionFile.includes(s.id)))
         )
       );
-      fs.writeFileSync(p, JSON.stringify(updated, null, 2));
+      if (!DRY_RUN) {
+        fs.writeFileSync(p, JSON.stringify(updated, null, 2));
+      }
       sessionsJson = updated;
     }
   }
@@ -631,7 +918,9 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
       const updated = Object.fromEntries(
         Object.entries(sessionsJson).filter(([, v]) => !v || v.sessionId !== o.id)
       );
-      fs.writeFileSync(p, JSON.stringify(updated, null, 2));
+      if (!DRY_RUN) {
+        fs.writeFileSync(p, JSON.stringify(updated, null, 2));
+      }
       sessionsJson = updated;
       totalTrashed++;
     }
@@ -667,7 +956,7 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
       }
     }
 
-    if (item.type === "deleted") {
+    if (item.type === "deleted" && item.baseid) {
       cleanedDeletedBaseIds.add(item.baseid);
     }
   }
@@ -679,7 +968,35 @@ async function cleanupAgent(stateDir, AGENT_ID, trashCmd) {
         ([, v]) => !v || !cleanedDeletedBaseIds.has(v.sessionId)
       )
     );
-    fs.writeFileSync(p, JSON.stringify(updated, null, 2));
+    if (!DRY_RUN) {
+      fs.writeFileSync(p, JSON.stringify(updated, null, 2));
+    }
+  }
+
+  // Clean legacy import archive
+  for (const dir of selectedImportArchive) {
+    const item = importArchive;
+    if (!item || item.dir !== dir) continue;
+
+    log.step(`${DRY_RUN ? "[dry-run] Would trash" : "Trashing"} legacy import archive (${fmt(item.size)})`);
+    appendAudit(`DELETE_IMPORT_ARCHIVE ${item.dir}`);
+    if (await trashFile(trashCmd, item.dir)) {
+      totalTrashed++;
+      totalSize += item.size;
+    }
+  }
+
+  // Clean DB backups / temp files
+  for (const file of selectedDbBackups) {
+    const backup = dbBackups.find((b) => b.file === file);
+    if (!backup) continue;
+
+    log.step(`${DRY_RUN ? "[dry-run] Would trash" : "Trashing"} DB backup ${backup.name} (${fmt(backup.size)})`);
+    appendAudit(`DELETE_DB_BACKUP ${backup.file}`);
+    if (await trashFile(trashCmd, backup.file)) {
+      totalTrashed++;
+      totalSize += backup.size;
+    }
   }
 
   appendAudit(`SUMMARY agent=${AGENT_ID} trashed=${totalTrashed} freed=${totalSize}`);
@@ -699,7 +1016,21 @@ async function main() {
 
   const stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), ".openclaw");
 
+  if (DRY_RUN) {
+    log.info("Dry-run mode enabled — no files will be changed.");
+  }
+
   intro("Session Cleanup");
+
+  if (CLI_AGENT) {
+    const agentsDir = path.join(stateDir, "agents");
+    if (!fs.existsSync(path.join(agentsDir, CLI_AGENT))) {
+      console.error(`Error: Agent not found: ${CLI_AGENT}`);
+      process.exit(1);
+    }
+    await cleanupAgent(stateDir, CLI_AGENT, trashCmd);
+    return;
+  }
 
   while (true) {
     const AGENT_ID = await selectAgent(stateDir);
